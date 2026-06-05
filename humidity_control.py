@@ -6,22 +6,28 @@ switched to Dry mode. When it falls to the OFF threshold (default 54%) or below,
 the AC is turned off. Between the two thresholds it holds its current state
 (hysteresis), preventing rapid on/off flapping.
 
-Each cycle it also writes a status snapshot (data/status.json) and logs to
-data/control.log so the web UI can show the latest readings, AC states and logs.
-If the web UI has set a manual override, automation is paused until "Resume Auto".
+A single Bluetooth scan runs continuously for the whole life of the process, so
+every sensor — including weak ones — keeps getting picked up. The control loop
+refreshes the status snapshot (data/status.json) frequently from the latest
+readings, and re-evaluates the ACs every --poll seconds. Logs go to
+data/control.log. If the web UI has set a manual override, automation is paused
+until "Resume Auto".
 
 Modes (auto-selected): per-room when core.AC_BY_ROOM is filled in, else aggregate
 (the most humid room drives every AC).
 
 Run:
-  ./run.sh control            # continuous loop (default 5-min poll)
+  ./run.sh control            # continuous loop
   ./run.sh control --once     # single check, then exit (for cron/launchd)
-  ./run.sh control --dry-run  # decide & print, but never touch an AC
+  ./run.sh control --dry-run  # decide & log, but never touch an AC
 """
 
 import argparse
 import asyncio
 import time
+from datetime import datetime, timedelta
+
+from bleak import BleakScanner
 
 from core import (
     AC_BY_ROOM, OFF_THRESHOLD, OFF_WEEKDAY, OFF_WEEKEND, ON_THRESHOLD,
@@ -30,7 +36,7 @@ from core import (
     now_iso, query_ac_states, read_override, read_status, room_for, save_state,
     write_status,
 )
-from humidity_sensors import DEFAULT_PREFIX, collect_readings
+from humidity_sensors import DEFAULT_PREFIX, make_collector
 
 
 def build_targets(rooms, acs):
@@ -102,45 +108,53 @@ async def apply_target(key, label, desired, devices, state, dry_run, ac_states):
     return f"{label} => set '{desired}'"
 
 
-async def run_cycle(args, acs, state, last_sensors):
-    # 1) Bluetooth: humidity / temperature
-    readings = await collect_readings(
-        window=args.scan_window, prefix=args.prefix, expected=len(ROOM_BY_CODE)
-    )
-    for reading in readings.values():
+def snapshot_sensors(sensors, last_sensors, max_age):
+    """Read the live (continuously scanned) sensor dict.
+
+    Updates `last_sensors` (for the status display) with every known reading and
+    returns {room: humidity} for readings fresh enough (<= max_age seconds) to
+    drive decisions. A continuously-running scanner keeps these fresh.
+    """
+    now_mono = time.monotonic()
+    now_wall = datetime.now().astimezone()
+    fresh = {}
+    for reading in list(sensors.values()):
+        age = now_mono - reading["last_seen"]
         room = room_for(reading["name"]) or reading["name"]
         last_sensors[room] = {
             "humidity": reading["humidity"],
             "temperature_c": reading["temperature_c"],
             "battery": reading["battery"],
             "rssi": reading["rssi"],
-            "last_seen_iso": now_iso(),
+            "last_seen_iso": (now_wall - timedelta(seconds=age)).isoformat(timespec="seconds"),
         }
-    rooms = {room_for(r["name"]) or r["name"]: r["humidity"] for r in readings.values()}
+        if age <= max_age:
+            fresh[room] = reading["humidity"]
+    return fresh
 
-    # 2) AC states (best effort, for the UI)
-    ac_states = await query_ac_states(acs)
 
-    # 3) Decide & act. Precedence: manual override > OFF schedule > humidity logic.
+async def decide_and_act(args, acs, state, rooms, ac_states):
+    """Run the control logic once and return the list of decision log lines.
+
+    Precedence: manual override > OFF schedule > humidity logic. Actuation is
+    reconciled against the live AC states in `ac_states`.
+    """
     override = read_override()
-    manual = override.get("mode") == "manual"
-    off_now, window_label = in_off_window()
+    off_now, _ = in_off_window()
     decisions = []
 
-    if manual:
-        status_mode = "manual"
+    if override.get("mode") == "manual":
         decisions.append(f"manual override ({override.get('action')}) — automation paused")
     elif off_now:
-        status_mode = "scheduled-off"
+        _, window_label = in_off_window()
         for key, label, devices in controlled_units(acs):
             decisions.append(await apply_target(
                 key, f"{label} [off-window {window_label}]", "off", devices, state,
                 args.dry_run, ac_states))
     else:
-        status_mode = "auto"
         targets = build_targets(rooms, acs)
         if not targets:
-            decisions.append("no sensors heard this cycle — ACs unchanged")
+            decisions.append("no fresh sensor readings — ACs unchanged")
         for key, label, humidity, devices in targets:
             desired = decide(humidity, state.get(key))
             decisions.append(await apply_target(
@@ -149,29 +163,9 @@ async def run_cycle(args, acs, state, last_sensors):
 
     for line in decisions:
         logger.info(line)
-
     if not args.dry_run:
         save_state(state)
-
-    # 4) Status snapshot for the web UI
-    write_status({
-        "updated_at": now_iso(),
-        "mode": status_mode,
-        "override_action": override.get("action") if manual else None,
-        "dry_run": args.dry_run,
-        "control_mode": "per-room" if AC_BY_ROOM else "aggregate",
-        "thresholds": {"on": ON_THRESHOLD, "off": OFF_THRESHOLD},
-        "schedule": {
-            "off_now": off_now,
-            "window": window_label,
-            "tz": SCHEDULE_TZ,
-            "weekday_off": OFF_WEEKDAY,
-            "weekend_off": OFF_WEEKEND,
-        },
-        "sensors": last_sensors,
-        "acs": ac_states,
-        "decisions": decisions,
-    })
+    return decisions
 
 
 def parse_args():
@@ -180,10 +174,13 @@ def parse_args():
     )
     p.add_argument("--once", action="store_true",
                    help="run a single check and exit (for cron/launchd)")
-    p.add_argument("--poll", type=float, default=300.0, metavar="SECONDS",
-                   help="seconds between checks in loop mode (default: 300)")
-    p.add_argument("--scan-window", type=float, default=30.0, metavar="SECONDS",
-                   help="seconds to scan for sensors each cycle (default: 30)")
+    p.add_argument("--poll", type=float, default=60.0, metavar="SECONDS",
+                   help="seconds between AC re-evaluations (default: 60)")
+    p.add_argument("--refresh", type=float, default=5.0, metavar="SECONDS",
+                   help="seconds between status/sensor refreshes (default: 5)")
+    p.add_argument("--max-age", type=float, default=300.0, metavar="SECONDS",
+                   help="ignore sensor readings older than this for decisions "
+                        "(default: 300)")
     p.add_argument("--ac-wait", type=int, default=6, metavar="SECONDS",
                    help="seconds to wait for AC discovery (default: 6)")
     p.add_argument("--prefix", default=DEFAULT_PREFIX,
@@ -191,6 +188,12 @@ def parse_args():
     p.add_argument("--dry-run", action="store_true",
                    help="decide and log actions but don't change any AC")
     return p.parse_args()
+
+
+def _status_mode(off_now):
+    if read_override().get("mode") == "manual":
+        return "manual"
+    return "scheduled-off" if off_now else "auto"
 
 
 async def main_async():
@@ -201,21 +204,57 @@ async def main_async():
     logger.info("OFF schedule (%s): weekday off=[%s] weekend off=[%s]",
                 SCHEDULE_TZ, OFF_WEEKDAY, OFF_WEEKEND)
 
+    # One continuous Bluetooth scan for the whole process — always picking up sensors.
+    sensors, callback = make_collector(args.prefix)
+    scanner = BleakScanner(detection_callback=callback)
+    await scanner.start()
+    logger.info("Continuous BLE scan started (prefix=%s)", args.prefix)
+
     acs = await discover_acs(args.ac_wait)
     logger.info("Discovered %d AC(s): %s", len(acs), ", ".join(acs) or "none")
 
     state = load_state()
     last_sensors = dict(read_status().get("sensors", {}))  # survive restarts
+    ac_states = {}
+    decisions = []
+    next_decision = 0.0  # decide immediately on first tick
 
-    while True:
-        try:
-            acs.update(await discover_acs(args.ac_wait))  # DHCP-safe refresh
-            await run_cycle(args, acs, state, last_sensors)
-        except Exception as exc:  # keep the loop alive across transient errors
-            logger.exception("Cycle error: %s", exc)
-        if args.once:
-            break
-        await asyncio.sleep(args.poll)
+    try:
+        while True:
+            rooms = snapshot_sensors(sensors, last_sensors, args.max_age)
+
+            if time.monotonic() >= next_decision:
+                try:
+                    acs.update(await discover_acs(args.ac_wait))  # DHCP-safe refresh
+                    ac_states = await query_ac_states(acs)
+                    decisions = await decide_and_act(args, acs, state, rooms, ac_states)
+                except Exception as exc:  # keep the loop alive across transient errors
+                    logger.exception("Decision error: %s", exc)
+                next_decision = time.monotonic() + args.poll
+
+            off_now, window_label = in_off_window()
+            override = read_override()
+            write_status({
+                "updated_at": now_iso(),
+                "mode": _status_mode(off_now),
+                "override_action": override.get("action") if override.get("mode") == "manual" else None,
+                "dry_run": args.dry_run,
+                "control_mode": mode,
+                "thresholds": {"on": ON_THRESHOLD, "off": OFF_THRESHOLD},
+                "schedule": {
+                    "off_now": off_now, "window": window_label, "tz": SCHEDULE_TZ,
+                    "weekday_off": OFF_WEEKDAY, "weekend_off": OFF_WEEKEND,
+                },
+                "sensors": last_sensors,
+                "acs": ac_states,
+                "decisions": decisions,
+            })
+
+            if args.once:
+                break
+            await asyncio.sleep(args.refresh)
+    finally:
+        await scanner.stop()
     return 0
 
 
