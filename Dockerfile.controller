@@ -19,5 +19,5 @@ ENV DATA_DIR=/data
 VOLUME ["/data"]
 
 # -u = unbuffered, so `docker logs` shows output live.
-# Bluetooth scans continuously; --poll is how often the ACs are re-evaluated.
-CMD ["python", "-u", "humidity_control.py", "--poll", "60"]
+# Bluetooth scans continuously; defaults: refresh 1s, poll 30s, max-age 15min.
+CMD ["python", "-u", "humidity_control.py"]

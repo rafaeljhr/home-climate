@@ -174,13 +174,13 @@ def parse_args():
     )
     p.add_argument("--once", action="store_true",
                    help="run a single check and exit (for cron/launchd)")
-    p.add_argument("--poll", type=float, default=60.0, metavar="SECONDS",
-                   help="seconds between AC re-evaluations (default: 60)")
-    p.add_argument("--refresh", type=float, default=5.0, metavar="SECONDS",
-                   help="seconds between status/sensor refreshes (default: 5)")
-    p.add_argument("--max-age", type=float, default=300.0, metavar="SECONDS",
+    p.add_argument("--poll", type=float, default=30.0, metavar="SECONDS",
+                   help="seconds between AC re-evaluations (default: 30)")
+    p.add_argument("--refresh", type=float, default=1.0, metavar="SECONDS",
+                   help="seconds between status/sensor refreshes (default: 1)")
+    p.add_argument("--max-age", type=float, default=900.0, metavar="SECONDS",
                    help="ignore sensor readings older than this for decisions "
-                        "(default: 300)")
+                        "(default: 900 = 15 min)")
     p.add_argument("--ac-wait", type=int, default=6, metavar="SECONDS",
                    help="seconds to wait for AC discovery (default: 6)")
     p.add_argument("--prefix", default=DEFAULT_PREFIX,
