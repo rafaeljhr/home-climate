@@ -1,0 +1,7 @@
+# Web UI deps: Gree control (no Bluetooth) + Flask. Keep versions in sync with
+# requirements.txt for the shared greeclimate stack.
+greeclimate==2.1.4
+netifaces==0.11.0
+pycryptodome==3.23.0
+flask==3.0.3
+tzdata==2025.1

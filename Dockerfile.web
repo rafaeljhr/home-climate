@@ -1,0 +1,22 @@
+# Web UI: shows sensor/AC state + logs and lets you control the ACs.
+# No Bluetooth here — it reads the controller's status file and talks to the ACs
+# over the LAN, so it only needs host networking (for UDP/7000 broadcast).
+FROM python:3.11-slim-bookworm
+
+WORKDIR /app
+
+# build deps for netifaces (pulled in via greeclimate / core).
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends gcc libc6-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY requirements-web.txt .
+RUN pip install --no-cache-dir -r requirements-web.txt
+
+# core.py imports test.py; webapp.py imports core. No bleak / humidity_sensors needed.
+COPY core.py test.py webapp.py ./
+
+ENV DATA_DIR=/data
+EXPOSE 8000
+
+CMD ["python", "-u", "webapp.py"]

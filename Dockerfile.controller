@@ -1,0 +1,22 @@
+# Controller: scans the ThermoPro sensors over Bluetooth and drives the ACs.
+# Runs forever on the Raspberry Pi. Needs host networking + the host D-Bus socket
+# so bleak can talk to the Pi's BlueZ stack (see docker-compose.yml).
+FROM python:3.11-slim-bookworm
+
+WORKDIR /app
+
+# build deps for netifaces (C extension); harmless to keep on a home Pi image.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends gcc libc6-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY core.py test.py humidity_sensors.py humidity_control.py ./
+
+ENV DATA_DIR=/data
+VOLUME ["/data"]
+
+# -u = unbuffered, so `docker logs` shows output live.
+CMD ["python", "-u", "humidity_control.py", "--poll", "300", "--scan-window", "30"]

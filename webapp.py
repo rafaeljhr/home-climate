@@ -1,0 +1,563 @@
+#!/usr/bin/env python3
+"""A small Flask UI for the humidity / Gree-AC system.
+
+Reads the controller's status.json and control.log for display, and issues
+manual AC commands (off / dry / cool / heat, with a target temperature). A manual
+command pauses the automation (by writing an override) until you press
+"Resume Auto".
+
+The page polls /api/state in the background (no full reloads) and posts control
+actions via fetch, so it updates live without resetting the dropdowns.
+
+Run locally:  python webapp.py   ->  http://localhost:8000
+In Docker it listens on 0.0.0.0:8000 with host networking (http://<pi-ip>:8000).
+"""
+
+import asyncio
+import hmac
+import os
+import time
+from datetime import datetime
+
+from flask import (Flask, Response, jsonify, redirect, render_template_string,
+                   request, url_for)
+
+import core
+
+app = Flask(__name__)
+
+# Optional HTTP Basic auth — enforced only when BOTH env vars are set.
+WEB_USER = os.environ.get("WEB_USER", "")
+WEB_PASSWORD = os.environ.get("WEB_PASSWORD", "")
+AUTH_ENABLED = bool(WEB_USER and WEB_PASSWORD)
+
+
+@app.before_request
+def _require_auth():
+    if not AUTH_ENABLED:
+        return None
+    auth = request.authorization
+    if (auth and hmac.compare_digest(auth.username or "", WEB_USER)
+            and hmac.compare_digest(auth.password or "", WEB_PASSWORD)):
+        return None
+    return Response("Authentication required.", 401,
+                    {"WWW-Authenticate": 'Basic realm="Home Climate"'})
+
+# Cache discovered ACs so button presses don't pay the discovery cost each time.
+_ac_cache = {"acs": {}, "ts": 0.0}
+AC_CACHE_TTL = 120  # seconds
+
+# Optimistic AC states from just-issued manual commands, shown until the
+# controller's status snapshot catches up. {mac: {power, mode, target_temp, ts}}
+_optimistic = {}
+
+
+def _expected_state(act, temp):
+    if act == "off":
+        return {"power": False}
+    return {"power": True, "mode": act.capitalize(),
+            "target_temp": core.clamp_temperature(act, temp)}
+
+TEMP_OPTIONS = {mode: list(range(lo, hi + 1)) for mode, (lo, hi) in core.TEMP_RANGES.items()}
+TEMP_DEFAULTS = {mode: core.clamp_temperature(mode, None) for mode in core.TEMP_RANGES}
+ROOM_BY_AC = {mac: room for room, mac in core.AC_BY_ROOM.items()}
+
+
+def get_acs(force=False):
+    if force or not _ac_cache["acs"] or (time.time() - _ac_cache["ts"]) > AC_CACHE_TTL:
+        _ac_cache["acs"] = asyncio.run(core.discover_acs())
+        _ac_cache["ts"] = time.time()
+    return _ac_cache["acs"]
+
+
+def age_str(iso):
+    if not iso:
+        return "never"
+    try:
+        when = datetime.fromisoformat(iso)
+    except ValueError:
+        return "?"
+    secs = (datetime.now(when.tzinfo) - when).total_seconds()
+    if secs < 90:
+        return f"{int(secs)}s ago"
+    if secs < 5400:
+        return f"{int(secs // 60)}m ago"
+    return f"{int(secs // 3600)}h ago"
+
+
+def tail_log(n=80):
+    try:
+        return core.LOG_FILE.read_text().splitlines()[-n:]
+    except FileNotFoundError:
+        return []
+
+
+def humidity_class(humidity, thresholds):
+    if humidity is None:
+        return ""
+    if humidity > thresholds.get("on", core.ON_THRESHOLD):
+        return "hi-dry"
+    if humidity <= thresholds.get("off", core.OFF_THRESHOLD):
+        return "hi-off"
+    return "hi-hold"
+
+
+def _power_pill(a):
+    if a.get("error"):
+        return "amber", "unreachable"
+    if a.get("power"):
+        return "green", "ON"
+    return "off", "off"
+
+
+def _status_pill(status, override):
+    if override.get("mode") == "manual":
+        return "red", "MANUAL · automation paused"
+    if status.get("mode") == "scheduled-off":
+        win = status.get("schedule", {}).get("window", "")
+        return "amber", f"SCHEDULED OFF · {win}".strip(" ·")
+    return "green", "AUTO · humidity in control"
+
+
+def collect():
+    """Build the snapshot shared by the page render and the JSON API."""
+    status = core.read_status()
+    override = core.read_override()
+    thresholds = status.get("thresholds", {"on": core.ON_THRESHOLD, "off": core.OFF_THRESHOLD})
+
+    sensors = []
+    for room, s in sorted(status.get("sensors", {}).items()):
+        temp_c = s.get("temperature_c") or 0.0
+        sensors.append({
+            "room": room,
+            "humidity": s.get("humidity"),
+            "temp_c": round(temp_c, 1),
+            "temp_f": round(temp_c * 9 / 5 + 32, 1),
+            "battery": s.get("battery"),
+            "rssi": s.get("rssi"),
+            "age": age_str(s.get("last_seen_iso")),
+            "cls": humidity_class(s.get("humidity"), thresholds),
+        })
+
+    try:
+        status_epoch = datetime.fromisoformat(status["updated_at"]).timestamp()
+    except (KeyError, ValueError, TypeError):
+        status_epoch = 0.0
+
+    acs = []
+    for mac, a in sorted(status.get("acs", {}).items()):
+        ov = _optimistic.get(mac)
+        if ov and ov["ts"] > status_epoch:  # show our recent manual change first
+            a = {**a, **{k: v for k, v in ov.items() if k != "ts"}}
+            a.pop("error", None)
+        cls, txt = _power_pill(a)
+        acs.append({
+            "mac": mac, "room": ROOM_BY_AC.get(mac, "—"), "ip": a.get("ip"),
+            "mode": a.get("mode"), "target_temp": a.get("target_temp"),
+            "power_cls": cls, "power_text": txt,
+        })
+
+    if status:
+        meta = (f"Updated {age_str(status.get('updated_at'))} · {status.get('control_mode', '')}"
+                f" · dry >{thresholds['on']}% , off ≤{thresholds['off']}%")
+        if status.get("dry_run"):
+            meta += " · DRY-RUN"
+    else:
+        meta = "No status yet — is the controller running?"
+
+    sc = status.get("schedule")
+    schedule = ""
+    if sc:
+        schedule = (f"OFF schedule ({sc.get('tz')}): weekday [{sc.get('weekday_off') or '—'}]"
+                    f" · weekend [{sc.get('weekend_off') or '—'}]"
+                    f" · now {'OFF' if sc.get('off_now') else 'RUNNING'}")
+
+    pill_cls, pill_text = _status_pill(status, override)
+    return {
+        "pill_cls": pill_cls, "pill_text": pill_text, "meta": meta, "schedule": schedule,
+        "manual": override.get("mode") == "manual",
+        "sensors": sensors, "acs": acs, "log": tail_log(),
+    }
+
+
+# Self-contained inline SVG wordmarks (no external assets; render offline).
+GREE_LOGO = (
+    '<svg class="logo" viewBox="0 0 86 24" height="18" role="img" aria-label="GREE">'
+    '<text x="0" y="19" font-family="Helvetica,Arial,sans-serif" font-size="22" '
+    'font-weight="800" letter-spacing="1.5" fill="#0a74c4">GREE</text></svg>'
+)
+TEMPPRO_LOGO = (
+    '<svg class="logo" viewBox="0 0 126 24" height="18" role="img" aria-label="TempPro">'
+    '<g fill="#e23b2e"><rect x="2" y="2" width="6" height="13" rx="3"/>'
+    '<circle cx="5" cy="18" r="4.2"/><rect x="3.5" y="9" width="3" height="9"/></g>'
+    '<text x="15" y="19" font-family="Helvetica,Arial,sans-serif" font-size="20" '
+    'font-weight="800" fill="#e23b2e">Temp<tspan font-weight="900" fill="#b62a1f">Pro</tspan>'
+    '</text></svg>'
+)
+
+
+PAGE = """<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <noscript><meta http-equiv="refresh" content="15"></noscript>
+  <title>Home Climate</title>
+  <style>
+    :root {
+      --bg:#eef1f6; --card:#ffffff; --text:#16202e; --muted:#67748a;
+      --border:#e2e7ef; --shadow:0 1px 3px rgba(20,30,50,.08),0 1px 2px rgba(20,30,50,.04);
+      --accent:#0a74c4; --green:#1f9d57; --green-bg:#1f9d5719;
+      --amber:#c98a12; --amber-bg:#c98a1219; --red:#d24b3a; --red-bg:#d24b3a19;
+      --track:#e7ebf2;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg:#0e131b; --card:#19212c; --text:#e8eef6; --muted:#90a0b6;
+        --border:#28323f; --shadow:0 1px 2px rgba(0,0,0,.4);
+        --accent:#46a3e6; --green:#34c884; --green-bg:#34c8841f;
+        --amber:#e0a93b; --amber-bg:#e0a93b1f; --red:#ef6a59; --red-bg:#ef6a591f;
+        --track:#28323f;
+      }
+    }
+    * { box-sizing:border-box; }
+    body { font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif;
+      margin:0; background:var(--bg); color:var(--text); line-height:1.45; }
+    .wrap { max-width:940px; margin:0 auto; padding:1rem 1.1rem 2.5rem; }
+    .logo { vertical-align:middle; }
+
+    header { display:flex; align-items:center; justify-content:space-between;
+      flex-wrap:wrap; gap:.6rem; padding:.4rem 0 1rem; }
+    header h1 { font-size:1.35rem; margin:0; display:flex; align-items:center; gap:.5rem; }
+    .powered { display:flex; align-items:center; gap:.7rem; font-size:.8rem; color:var(--muted); }
+
+    .pill { display:inline-flex; align-items:center; gap:.4rem; padding:.25rem .7rem;
+      border-radius:999px; font-size:.82rem; font-weight:700; border:1px solid transparent; }
+    .pill.green { background:var(--green-bg); color:var(--green); border-color:var(--green); }
+    .pill.amber { background:var(--amber-bg); color:var(--amber); border-color:var(--amber); }
+    .pill.red { background:var(--red-bg); color:var(--red); border-color:var(--red); }
+    .pill.off { color:var(--muted); border-color:var(--border); }
+    .pill.dot::before { content:""; width:.5rem; height:.5rem; border-radius:50%;
+      background:currentColor; }
+
+    .meta { color:var(--muted); font-size:.85rem; margin:.15rem 0; }
+    .card { background:var(--card); border:1px solid var(--border); border-radius:14px;
+      box-shadow:var(--shadow); padding:1rem 1.1rem; }
+
+    .statusbar { display:flex; align-items:center; justify-content:space-between;
+      flex-wrap:wrap; gap:.6rem; margin-bottom:1rem; }
+    .statusbar .info { display:flex; flex-direction:column; gap:.1rem; }
+    .statusbar form { margin:0; }
+    #live { font-size:.72rem; color:var(--muted); transition:opacity .3s; }
+    #live::before { content:"● "; color:var(--green); }
+
+    h2 { font-size:1rem; letter-spacing:.02em; text-transform:uppercase; color:var(--muted);
+      margin:1.6rem .2rem .7rem; display:flex; align-items:center; gap:.55rem; }
+
+    .grid { display:grid; gap:.8rem; grid-template-columns:repeat(auto-fill,minmax(220px,1fr)); }
+
+    .sensor .top { display:flex; justify-content:space-between; align-items:baseline; }
+    .sensor .room { font-weight:700; }
+    .sensor .big { font-size:2rem; font-weight:800; line-height:1.1; margin:.3rem 0 .1rem; }
+    .bar { height:7px; border-radius:999px; background:var(--track); overflow:hidden; margin:.3rem 0 .55rem; }
+    .bar > i { display:block; height:100%; border-radius:999px; }
+    .hi-dry { color:var(--red); } .hi-dry-bg { background:var(--red); }
+    .hi-hold { color:var(--amber); } .hi-hold-bg { background:var(--amber); }
+    .hi-off { color:var(--green); } .hi-off-bg { background:var(--green); }
+    .sensor .sub { font-size:.82rem; color:var(--muted); }
+
+    .ac .top { display:flex; justify-content:space-between; align-items:center; gap:.5rem; }
+    .ac .room { font-weight:700; }
+    .ac .mac { font-size:.74rem; color:var(--muted); }
+    .ac .state { font-size:.84rem; color:var(--muted); margin:.45rem 0 .65rem; }
+    .ac .state b { color:var(--text); font-weight:600; }
+
+    .controls { display:flex; flex-direction:column; gap:.45rem; }
+    .ctl { display:flex; align-items:center; gap:.5rem; margin:0; }
+    .ctl.mode button { min-width:64px; text-align:center; }
+    .ctl.off button { width:100%; }
+    .ctl .at { margin-left:auto; color:var(--muted); font-size:.8rem; }
+    select { padding:.32rem .4rem; border-radius:8px; border:1px solid var(--border);
+      background:var(--bg); color:var(--text); font-size:.82rem; min-width:64px; }
+    button { padding:.4rem .7rem; border-radius:8px; border:1px solid var(--border);
+      background:var(--bg); color:var(--text); cursor:pointer; font-size:.82rem; font-weight:600; }
+    button:hover { border-color:var(--accent); }
+    button.b-off { color:var(--green); } button.b-dry { color:var(--accent); }
+    button.b-cool { color:#7b58c9; } button.b-heat { color:var(--amber); }
+    button.primary { background:var(--accent); color:#fff; border-color:var(--accent); }
+    button:disabled { opacity:.5; cursor:default; }
+    button.busy { color:transparent !important; opacity:1 !important; position:relative; }
+    button.busy::after { content:""; position:absolute; top:50%; left:50%;
+      width:13px; height:13px; margin:-7px 0 0 -7px; border-radius:50%;
+      border:2px solid var(--muted); border-top-color:transparent;
+      animation:spin .6s linear infinite; }
+    @keyframes spin { to { transform:rotate(360deg); } }
+
+    pre { background:#0b0f15; color:#c9d6e5; padding:.85rem 1rem; border-radius:12px;
+      overflow:auto; max-height:300px; font-size:.78rem; line-height:1.5;
+      font-family:ui-monospace,SFMono-Regular,Menlo,monospace; border:1px solid var(--border); }
+    footer { margin-top:1.6rem; text-align:center; color:var(--muted); font-size:.78rem; }
+    .toast { position:fixed; left:50%; bottom:1.2rem; transform:translateX(-50%) translateY(2rem);
+      background:var(--card); color:var(--text); border:1px solid var(--border);
+      box-shadow:var(--shadow); padding:.6rem 1rem; border-radius:10px; font-size:.86rem;
+      font-weight:600; opacity:0; pointer-events:none; max-width:90vw;
+      transition:opacity .25s, transform .25s; z-index:10; }
+    .toast.show { opacity:1; transform:translateX(-50%) translateY(0); }
+    .toast.ok { border-color:var(--green); }
+    .toast.err { border-color:var(--red); color:var(--red); }
+  </style>
+</head>
+<body>
+<div class="wrap">
+{% macro controls(mac) %}
+  <form class="ctl off" method="post" action="/action">
+    <input type="hidden" name="mac" value="{{ mac }}">
+    <input type="hidden" name="action" value="off"><button class="b-off">Turn off</button>
+  </form>
+  {% for mode in ['dry', 'cool', 'heat'] %}
+  <form class="ctl mode" method="post" action="/action">
+    <input type="hidden" name="mac" value="{{ mac }}">
+    <input type="hidden" name="action" value="{{ mode }}">
+    <button class="b-{{ mode }}">{{ mode|capitalize }}</button>
+    <span class="at">at</span>
+    <select name="temp">{% for t in temp_options[mode] %}<option value="{{ t }}"{% if t == temp_defaults[mode] %} selected{% endif %}>{{ t }}&deg;C</option>{% endfor %}</select>
+  </form>
+  {% endfor %}
+{% endmacro %}
+
+  <header>
+    <h1>&#127968; Home Climate</h1>
+    <div class="powered"><span>powered by</span>{{ gree_logo|safe }}{{ temppro_logo|safe }}</div>
+  </header>
+
+  <div class="card statusbar">
+    <div class="info">
+      <span class="pill dot {{ snap.pill_cls }}" id="statuspill">{{ snap.pill_text }}</span>
+      <span class="meta" id="meta">{{ snap.meta }}</span>
+      <span class="meta" id="sched"{% if not snap.schedule %} hidden{% endif %}>{{ snap.schedule }}</span>
+      <span id="live">live</span>
+    </div>
+    <form id="resume" method="post" action="{{ url_for('action') }}"{% if not snap.manual %} hidden{% endif %}>
+      <input type="hidden" name="action" value="auto">
+      <button class="primary" type="submit">&#9654; Resume Auto</button>
+    </form>
+  </div>
+
+  <h2>Sensors {{ temppro_logo|safe }}</h2>
+  <div class="grid" id="sensors">
+    {% for s in snap.sensors %}
+      <div class="card sensor">
+        <div class="top"><span class="room">{{ s.room }}</span><span class="sub">{{ s.age }}</span></div>
+        <div class="big {{ s.cls }}">{{ s.humidity if s.humidity is not none else '—' }}<span style="font-size:1rem">% RH</span></div>
+        <div class="bar"><i class="{{ s.cls }}-bg" style="width:{{ s.humidity or 0 }}%"></i></div>
+        <div class="sub">&#127777;&#65039; {{ s.temp_c }}&deg;C / {{ s.temp_f }}&deg;F
+          &nbsp;&middot;&nbsp; &#128267; {% if s.battery is not none %}~{{ s.battery }}%{% else %}&mdash;{% endif %}
+          &nbsp;&middot;&nbsp; &#128246; {{ s.rssi }} dBm</div>
+      </div>
+    {% else %}
+      <div class="card sub">No sensor data yet.</div>
+    {% endfor %}
+  </div>
+
+  <h2>Air conditioners {{ gree_logo|safe }}</h2>
+  <div class="card" style="margin-bottom:.8rem">
+    <div class="top"><span class="room">All ACs</span></div>
+    <div class="controls" style="margin-top:.6rem">{{ controls('all') }}</div>
+  </div>
+  <div class="grid">
+    {% for a in snap.acs %}
+      <div class="card ac">
+        <div class="top">
+          <div><span class="room">{{ a.room }}</span> {{ gree_logo|safe }}<br><span class="mac">{{ a.mac }} &middot; {{ a.ip or '—' }}</span></div>
+          <span class="pill {{ a.power_cls }}{% if a.power_cls == 'green' %} dot{% endif %}" id="pill-{{ a.mac }}">{{ a.power_text }}</span>
+        </div>
+        <div class="state" id="state-{{ a.mac }}">Mode <b>{{ a.mode or '—' }}</b>{% if a.target_temp %} &middot; target <b>{{ a.target_temp }}&deg;C</b>{% endif %}</div>
+        <div class="controls">{{ controls(a.mac) }}</div>
+      </div>
+    {% else %}
+      <div class="card sub">No ACs in last snapshot.</div>
+    {% endfor %}
+  </div>
+
+  <h2>Recent log</h2>
+  <pre id="log">{% for line in snap.log %}{{ line }}
+{% endfor %}</pre>
+
+  <footer>Sensors by {{ temppro_logo|safe }} &middot; ACs by {{ gree_logo|safe }} &middot; updates live in the background</footer>
+</div>
+<div id="toast" class="toast"></div>
+
+<script>
+const esc = (x) => { const d = document.createElement('div'); d.textContent = (x==null?'':x); return d.innerHTML; };
+
+function sensorCard(s) {
+  const hum = (s.humidity==null) ? '&mdash;' : s.humidity;
+  const batt = (s.battery==null) ? '&mdash;' : ('~' + s.battery + '%');
+  return `<div class="card sensor">
+    <div class="top"><span class="room">${esc(s.room)}</span><span class="sub">${esc(s.age)}</span></div>
+    <div class="big ${s.cls}">${hum}<span style="font-size:1rem">% RH</span></div>
+    <div class="bar"><i class="${s.cls}-bg" style="width:${s.humidity||0}%"></i></div>
+    <div class="sub">&#127777;&#65039; ${s.temp_c}&deg;C / ${s.temp_f}&deg;F
+      &nbsp;&middot;&nbsp; &#128267; ${batt} &nbsp;&middot;&nbsp; &#128246; ${esc(s.rssi)} dBm</div>
+  </div>`;
+}
+
+async function update() {
+  let d;
+  try { d = await (await fetch('/api/state', {cache:'no-store'})).json(); }
+  catch (e) { const l = document.getElementById('live'); if (l) l.style.opacity = .3; return; }
+
+  const sp = document.getElementById('statuspill');
+  sp.className = 'pill dot ' + d.pill_cls;
+  sp.textContent = d.pill_text;
+  document.getElementById('meta').textContent = d.meta;
+  const sched = document.getElementById('sched');
+  sched.textContent = d.schedule; sched.hidden = !d.schedule;
+  document.getElementById('resume').hidden = !d.manual;
+
+  const grid = document.getElementById('sensors');
+  grid.innerHTML = d.sensors.length ? d.sensors.map(sensorCard).join('')
+                                    : '<div class="card sub">No sensor data yet.</div>';
+
+  d.acs.forEach(a => {
+    const pill = document.getElementById('pill-' + a.mac);
+    if (pill) { pill.className = 'pill ' + a.power_cls + (a.power_cls==='green' ? ' dot' : ''); pill.textContent = a.power_text; }
+    const st = document.getElementById('state-' + a.mac);
+    if (st) st.innerHTML = 'Mode <b>' + esc(a.mode || '—') + '</b>'
+        + (a.target_temp ? ' &middot; target <b>' + esc(a.target_temp) + '&deg;C</b>' : '');
+  });
+
+  const log = document.getElementById('log');
+  const atBottom = log.scrollTop + log.clientHeight >= log.scrollHeight - 4;
+  log.textContent = d.log.join('\\n');
+  if (atBottom) log.scrollTop = log.scrollHeight;
+
+  const live = document.getElementById('live'); if (live) live.style.opacity = 1;
+}
+
+let toastTimer;
+function toast(msg, ok) {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.className = 'toast show ' + (ok ? 'ok' : 'err');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { t.className = 'toast'; }, 3200);
+}
+
+// Post control actions via fetch so the page doesn't reload (keeps dropdowns).
+// NOTE: post to the literal '/action' — a hidden <input name="action"> shadows
+// the form's own .action property in the DOM, so f.action is NOT the URL.
+async function postForm(f, btn) {
+  // "thinking" UI: disable this card's controls + spinner on the clicked button
+  const scope = f.closest('.card') || f;
+  const buttons = scope.querySelectorAll('button');
+  buttons.forEach((b) => { b.disabled = true; });
+  if (btn) btn.classList.add('busy');
+  toast('Sending to the AC…', true);
+
+  let data = {};
+  try {
+    const res = await fetch('/action', {
+      method: 'POST',
+      headers: { 'X-Requested-With': 'fetch' },
+      body: new FormData(f),
+    });
+    data = await res.json();
+  } catch (e) {
+    data = { ok: false, message: 'Network error — is the server up?' };
+  } finally {
+    buttons.forEach((b) => { b.disabled = false; });
+    if (btn) btn.classList.remove('busy');
+  }
+  toast(data.message || 'Done', data.ok !== false);
+  update();
+}
+document.addEventListener('submit', (e) => {
+  const f = e.target;
+  if (!f.matches('form.ctl, #resume')) return;
+  e.preventDefault();
+  postForm(f, e.submitter);
+});
+
+document.addEventListener('DOMContentLoaded', () => { update(); setInterval(update, 10000); });
+</script>
+</body>
+</html>"""
+
+
+@app.route("/")
+def index():
+    return render_template_string(
+        PAGE, snap=collect(),
+        temp_options=TEMP_OPTIONS, temp_defaults=TEMP_DEFAULTS,
+        gree_logo=GREE_LOGO, temppro_logo=TEMPPRO_LOGO,
+    )
+
+
+@app.route("/api/state")
+def api_state():
+    return jsonify(collect())
+
+
+def _respond(ok, message):
+    """JSON for fetch() callers; redirect for plain (no-JS) form posts."""
+    if request.headers.get("X-Requested-With") == "fetch":
+        return jsonify(ok=ok, message=message)
+    return redirect(url_for("index"))
+
+
+@app.route("/action", methods=["POST"])
+def action():
+    act = request.form.get("action")
+    mac = request.form.get("mac", "all")
+
+    if act == "auto":
+        core.write_override("auto")
+        core.logger.info("Web: resume AUTO")
+        return _respond(True, "Resumed automatic mode")
+
+    if act not in ("off", "dry", "cool", "heat"):
+        return _respond(False, "Unknown action")
+
+    temp = request.form.get("temp", type=int)
+    acs = get_acs()
+    if mac != "all" and mac not in acs:
+        acs = get_acs(force=True)  # cache may be stale — re-discover once
+    targets = acs if mac == "all" else ({mac: acs[mac]} if mac in acs else {})
+
+    label = act if act == "off" else f"{act} {core.clamp_temperature(act, temp)}°C"
+
+    if not targets:
+        core.logger.info("Web: manual '%s' on %s -> AC not found", label, mac)
+        return _respond(False, f"Could not find that AC on the network ({mac})")
+
+    async def run():
+        return await asyncio.gather(
+            *(core.apply_action(info, act, temp) for info in targets.values()),
+            return_exceptions=True,
+        )
+
+    results = asyncio.run(run())
+    errors = [str(r) for r in results if isinstance(r, Exception)]
+    oks = [r for r in results if not isinstance(r, Exception)]
+
+    # Optimistically reflect the new state in the UI until the controller catches up.
+    expected = _expected_state(act, temp)
+    for (target_mac, _info), result in zip(targets.items(), results):
+        if not isinstance(result, Exception):
+            _optimistic[target_mac] = {**expected, "ts": time.time()}
+
+    if oks:  # at least one AC accepted the command -> pause the schedule
+        core.write_override("manual", action=f"{label} ({mac})")
+    core.logger.info("Web: manual '%s' on %s -> %s", label, mac,
+                     "; ".join(str(r) for r in results))
+
+    if errors and not oks:
+        return _respond(False, "Could not reach the AC: " + "; ".join(errors))
+    if errors:
+        return _respond(True, f"{label} sent (some ACs failed)")
+    return _respond(True, f"{label} sent — automation paused")
+
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=8000)

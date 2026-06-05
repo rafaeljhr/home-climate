@@ -1,0 +1,15 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Runtime data & logs (created under DATA_DIR at runtime)
+data/
+*.log
+
+# Secrets — provide values via a local .env (see .env.example)
+.env
+
+# OS
+.DS_Store

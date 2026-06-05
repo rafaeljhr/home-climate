@@ -1,0 +1,5 @@
+greeclimate==2.1.4
+netifaces==0.11.0
+pycryptodome==3.23.0
+bleak==3.0.2
+tzdata==2025.1
