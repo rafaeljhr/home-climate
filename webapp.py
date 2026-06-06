@@ -203,6 +203,8 @@ PAGE = """<!doctype html>
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <noscript><meta http-equiv="refresh" content="15"></noscript>
   <title>Home Climate</title>
+  <!-- Self-contained tab icon: a humidity droplet in the brand blue (inline SVG, no external asset). -->
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAzMiAzMiI+PHJlY3Qgd2lkdGg9IjMyIiBoZWlnaHQ9IjMyIiByeD0iNyIgZmlsbD0iIzBhNzRjNCIvPjxwYXRoIGQ9Ik0xNiA1LjVjMCAwLTcuNSA4LjItNy41IDEzLjRhNy41IDcuNSAwIDAgMCAxNSAwQzIzLjUgMTMuNyAxNiA1LjUgMTYgNS41WiIgZmlsbD0iI2ZmZmZmZiIvPjxjaXJjbGUgY3g9IjEzIiBjeT0iMTkuNSIgcj0iMi4zIiBmaWxsPSIjYmZlMGZhIi8+PC9zdmc+">
   <style>
     :root {
       --bg:#eef1f6; --card:#ffffff; --text:#16202e; --muted:#67748a;
