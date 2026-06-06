@@ -81,6 +81,19 @@ def _ac_in_state(desired, ac):
     return bool(ac.get("power")) and str(ac.get("mode", "")).lower() == desired
 
 
+def _is_manual_hold(ac):
+    """True if a person put this AC in a mode the automation never commands.
+
+    Humidity control only ever sets 'dry' or 'off', so a unit powered on in any
+    other mode (cool/heat/auto/fan) — e.g. Cool from the Gree app — was changed
+    by a human. We leave it under their control and don't reconcile it. The hold
+    is stateless: it clears itself as soon as the unit is back to dry or off.
+    """
+    if not ac or ac.get("error"):
+        return False
+    return bool(ac.get("power")) and str(ac.get("mode", "")).lower() != "dry"
+
+
 async def apply_target(key, label, desired, devices, state, dry_run, ac_states):
     """Drive a target toward `desired`, comparing against the ACs' ACTUAL state.
 
@@ -153,8 +166,13 @@ async def decide_and_act(args, acs, state, rooms, ac_states, enforce_off=True):
     elif off_now:
         _, window_label = in_off_window()
         for key, label, devices in controlled_units(acs):
-            powered_on = any(
-                bool((ac_states.get(d.mac) or {}).get("power")) for d in devices)
+            states = [ac_states.get(d.mac) for d in devices]
+            if devices and all(_is_manual_hold(ac) for ac in states):
+                mode = str((states[0] or {}).get("mode", "")).lower()
+                decisions.append(
+                    f"{label} [off-window {window_label}] — manual {mode}, leaving alone")
+                continue
+            powered_on = any(bool((ac or {}).get("power")) for ac in states)
             if not enforce_off and powered_on:
                 decisions.append(
                     f"{label} [off-window {window_label}] — manual ON, respecting")
@@ -167,6 +185,11 @@ async def decide_and_act(args, acs, state, rooms, ac_states, enforce_off=True):
         if not targets:
             decisions.append("no fresh sensor readings — ACs unchanged")
         for key, label, humidity, devices in targets:
+            states = [ac_states.get(d.mac) for d in devices]
+            if devices and all(_is_manual_hold(ac) for ac in states):
+                mode = str((states[0] or {}).get("mode", "")).lower()
+                decisions.append(f"{label}: {humidity}% — manual {mode}, leaving alone")
+                continue
             desired = decide(humidity, state.get(key))
             decisions.append(await apply_target(
                 key, f"{label}: {humidity}%", desired, devices, state,
