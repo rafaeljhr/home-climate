@@ -133,11 +133,16 @@ def snapshot_sensors(sensors, last_sensors, max_age):
     return fresh
 
 
-async def decide_and_act(args, acs, state, rooms, ac_states):
+async def decide_and_act(args, acs, state, rooms, ac_states, enforce_off=True):
     """Run the control logic once and return the list of decision log lines.
 
     Precedence: manual override > OFF schedule > humidity logic. Actuation is
     reconciled against the live AC states in `ac_states`.
+
+    `enforce_off` is True only on the cycle the OFF window is first entered: the
+    schedule forces every unit off then. On later cycles it's False, so a unit a
+    human switched back on (e.g. via the Gree app) is left alone instead of being
+    fought every poll — manual control wins inside the window once it's started.
     """
     override = read_override()
     off_now, _ = in_off_window()
@@ -148,6 +153,12 @@ async def decide_and_act(args, acs, state, rooms, ac_states):
     elif off_now:
         _, window_label = in_off_window()
         for key, label, devices in controlled_units(acs):
+            powered_on = any(
+                bool((ac_states.get(d.mac) or {}).get("power")) for d in devices)
+            if not enforce_off and powered_on:
+                decisions.append(
+                    f"{label} [off-window {window_label}] — manual ON, respecting")
+                continue
             decisions.append(await apply_target(
                 key, f"{label} [off-window {window_label}]", "off", devices, state,
                 args.dry_run, ac_states))
@@ -223,6 +234,7 @@ async def main_async():
     decisions = []
     next_decision = 0.0  # decide immediately on first tick
     next_flush = 0.0 if args.flush_interval else None  # flush once at startup too
+    was_off_window = False  # to detect the moment we enter an OFF window
 
     try:
         while True:
@@ -241,7 +253,11 @@ async def main_async():
                 try:
                     acs.update(await discover_acs(args.ac_wait))  # DHCP-safe refresh
                     ac_states = await query_ac_states(acs)
-                    decisions = await decide_and_act(args, acs, state, rooms, ac_states)
+                    off_now_decision, _ = in_off_window()
+                    enforce_off = off_now_decision and not was_off_window  # window just entered
+                    decisions = await decide_and_act(
+                        args, acs, state, rooms, ac_states, enforce_off)
+                    was_off_window = off_now_decision
                 except Exception as exc:  # keep the loop alive across transient errors
                     logger.exception("Decision error: %s", exc)
                 next_decision = time.monotonic() + args.poll
