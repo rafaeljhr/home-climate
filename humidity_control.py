@@ -32,9 +32,9 @@ from bleak import BleakScanner
 from core import (
     AC_BY_ROOM, OFF_THRESHOLD, OFF_WEEKDAY, OFF_WEEKEND, ON_THRESHOLD,
     ROOM_BY_CODE, SCHEDULE_TZ,
-    apply_action, decide, discover_acs, in_off_window, load_state, logger,
-    now_iso, query_ac_states, read_override, read_status, room_for, save_state,
-    write_status,
+    apply_action, decide, discover_acs, force_off_at_str, force_off_time,
+    in_off_window, load_state, logger, now_iso, now_local, query_ac_states,
+    read_override, read_status, room_for, save_state, write_status,
 )
 from humidity_sensors import DEFAULT_PREFIX, flush_bluez_cache, make_collector
 
@@ -94,6 +94,19 @@ def _is_manual_hold(ac):
     return bool(ac.get("power")) and str(ac.get("mode", "")).lower() != "dry"
 
 
+def _force_off_due(prev_wall, now_wall):
+    """True exactly once, when the wall clock crosses the daily force-off time.
+
+    Edge-triggered on the configured HH:MM so it fires a single shot per day and
+    never spuriously re-fires (or catches up hours later) after a restart.
+    """
+    ft = force_off_time()
+    if ft is None or prev_wall is None:
+        return False
+    target = now_wall.replace(hour=ft.hour, minute=ft.minute, second=0, microsecond=0)
+    return prev_wall < target <= now_wall
+
+
 async def apply_target(key, label, desired, devices, state, dry_run, ac_states):
     """Drive a target toward `desired`, comparing against the ACs' ACTUAL state.
 
@@ -146,22 +159,33 @@ def snapshot_sensors(sensors, last_sensors, max_age):
     return fresh
 
 
-async def decide_and_act(args, acs, state, rooms, ac_states, enforce_off=True):
+async def decide_and_act(args, acs, state, rooms, ac_states, enforce_off=True,
+                         force_off=False):
     """Run the control logic once and return the list of decision log lines.
 
-    Precedence: manual override > OFF schedule > humidity logic. Actuation is
-    reconciled against the live AC states in `ac_states`.
+    Precedence: daily force-off > manual override > OFF schedule > humidity logic.
+    Actuation is reconciled against the live AC states in `ac_states`.
 
     `enforce_off` is True only on the cycle the OFF window is first entered: the
     schedule forces every unit off then. On later cycles it's False, so a unit a
     human switched back on (e.g. via the Gree app) is left alone instead of being
     fought every poll — manual control wins inside the window once it's started.
+
+    `force_off` is True for the single cycle the daily force-off time is crossed:
+    every AC is turned off unconditionally, overriding manual Cool/Heat and any
+    pause — the backstop for units left on.
     """
     override = read_override()
     off_now, _ = in_off_window()
     decisions = []
 
-    if override.get("mode") == "manual":
+    if force_off:
+        hhmm = force_off_at_str()
+        for key, label, devices in controlled_units(acs):
+            decisions.append(await apply_target(
+                key, f"{label} [daily force-off {hhmm}]", "off", devices, state,
+                args.dry_run, ac_states))
+    elif override.get("mode") == "manual":
         decisions.append(f"manual override ({override.get('action')}) — automation paused")
     elif off_now:
         _, window_label = in_off_window()
@@ -258,6 +282,7 @@ async def main_async():
     next_decision = 0.0  # decide immediately on first tick
     next_flush = 0.0 if args.flush_interval else None  # flush once at startup too
     was_off_window = False  # to detect the moment we enter an OFF window
+    last_decision_wall = None  # wall clock at the previous decision (force-off edge)
 
     try:
         while True:
@@ -278,9 +303,12 @@ async def main_async():
                     ac_states = await query_ac_states(acs)
                     off_now_decision, _ = in_off_window()
                     enforce_off = off_now_decision and not was_off_window  # window just entered
+                    now_wall = now_local()
+                    force_off = _force_off_due(last_decision_wall, now_wall)
                     decisions = await decide_and_act(
-                        args, acs, state, rooms, ac_states, enforce_off)
+                        args, acs, state, rooms, ac_states, enforce_off, force_off)
                     was_off_window = off_now_decision
+                    last_decision_wall = now_wall
                 except Exception as exc:  # keep the loop alive across transient errors
                     logger.exception("Decision error: %s", exc)
                 next_decision = time.monotonic() + args.poll
@@ -297,6 +325,7 @@ async def main_async():
                 "schedule": {
                     "off_now": off_now, "window": window_label, "tz": SCHEDULE_TZ,
                     "weekday_off": OFF_WEEKDAY, "weekend_off": OFF_WEEKEND,
+                    "force_off_at": force_off_at_str(),
                 },
                 "sensors": last_sensors,
                 "acs": ac_states,

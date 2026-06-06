@@ -23,6 +23,10 @@ services:
       # Humidity thresholds (%RH): above ON -> Dry, at/below OFF -> Off.
       - HUMIDITY_ON=65
       - HUMIDITY_OFF=54
+      # Daily hard shutdown: forces EVERY AC off once at this time (HH:MM),
+      # overriding manual Cool/Heat — a backstop for units left on. Empty
+      # disables it. Can also be changed live in the web UI (which wins).
+      - FORCE_OFF_AT=02:00
     volumes:
       - data:/data
       # Talk to the host's BlueZ over D-Bus for Bluetooth scanning.

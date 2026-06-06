@@ -171,11 +171,14 @@ def collect():
         schedule = (f"OFF schedule ({sc.get('tz')}): weekday [{sc.get('weekday_off') or '—'}]"
                     f" · weekend [{sc.get('weekend_off') or '—'}]"
                     f" · now {'OFF' if sc.get('off_now') else 'RUNNING'}")
+    force_off_at = core.force_off_at_str()
+    if schedule:
+        schedule += f" · daily force-off {force_off_at or 'off'}"
 
     pill_cls, pill_text = _status_pill(status, override)
     return {
         "pill_cls": pill_cls, "pill_text": pill_text, "meta": meta, "schedule": schedule,
-        "manual": override.get("mode") == "manual",
+        "manual": override.get("mode") == "manual", "force_off_at": force_off_at,
         "sensors": sensors, "acs": acs, "log": tail_log(),
     }
 
@@ -345,6 +348,22 @@ PAGE = """<!doctype html>
     </form>
   </div>
 
+  <div class="card" style="margin-bottom:.8rem">
+    <div class="top"><span class="room">&#9200; Daily safety shut-off</span></div>
+    <div class="sub" style="margin:.35rem 0 .6rem">
+      Forces <b>every</b> AC off once a day — overrides manual Cool/Heat and any pause.
+      A backstop for units left on. Leave the time empty to disable.
+    </div>
+    <form id="settings" method="post" action="{{ url_for('settings') }}"
+          style="display:flex;gap:.6rem;align-items:center;flex-wrap:wrap">
+      <label class="sub">Force-off time
+        <input type="time" name="force_off_at" value="{{ force_off_at }}"
+               style="margin-left:.4rem;padding:.3rem .4rem">
+      </label>
+      <button class="primary" type="submit">Save</button>
+    </form>
+  </div>
+
   <h2>Sensors {{ temppro_logo|safe }}</h2>
   <div class="grid" id="sensors">
     {% for s in snap.sensors %}
@@ -490,7 +509,7 @@ document.addEventListener('DOMContentLoaded', () => { update(); setInterval(upda
 @app.route("/")
 def index():
     return render_template_string(
-        PAGE, snap=collect(),
+        PAGE, snap=collect(), force_off_at=core.force_off_at_str(),
         temp_options=TEMP_OPTIONS, temp_defaults=TEMP_DEFAULTS,
         gree_logo=GREE_LOGO, temppro_logo=TEMPPRO_LOGO,
     )
@@ -559,6 +578,23 @@ def action():
     if errors:
         return _respond(True, f"{label} sent (some ACs failed)")
     return _respond(True, f"{label} sent — automation paused")
+
+
+@app.route("/settings", methods=["POST"])
+def settings():
+    """Set the daily force-off time (HH:MM), or empty to disable. Picked up by the
+    controller on its next decision cycle."""
+    val = (request.form.get("force_off_at") or "").strip()
+    if val:
+        try:
+            core._parse_hhmm(val)  # validate HH:MM
+        except (ValueError, AttributeError):
+            return _respond(False, "Enter a time as HH:MM (e.g. 02:00) or leave it empty")
+    s = core.read_settings()
+    s["force_off_at"] = val
+    core.write_settings(s)
+    core.logger.info("Web: daily force-off time set to %s", val or "(disabled)")
+    return _respond(True, f"Daily force-off {'set to ' + val if val else 'disabled'}")
 
 
 if __name__ == "__main__":

@@ -58,12 +58,19 @@ SCHEDULE_TZ = os.environ.get("SCHEDULE_TZ", "Europe/Lisbon")
 OFF_WEEKDAY = os.environ.get("OFF_WEEKDAY", "13:00-17:00,22:00-10:00")
 OFF_WEEKEND = os.environ.get("OFF_WEEKEND", "22:00-11:00,13:00-17:00")
 
+# Daily hard shutdown (HH:MM in SCHEDULE_TZ): forces EVERY AC off once at this
+# time, overriding manual Cool/Heat and any pause — a backstop for units left on
+# (e.g. Cool forgotten during the day). "" disables it. Adjustable live from the
+# web UI (stored in settings.json), which takes precedence over this env default.
+FORCE_OFF_AT = os.environ.get("FORCE_OFF_AT", "02:00")
+
 # All persisted state lives under DATA_DIR (a shared Docker volume in production).
 DATA_DIR = Path(os.environ.get("DATA_DIR", Path(__file__).with_name("data")))
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 STATE_FILE = DATA_DIR / "control_state.json"   # hysteresis state, keyed per target
 STATUS_FILE = DATA_DIR / "status.json"         # snapshot the web UI reads
 OVERRIDE_FILE = DATA_DIR / "override.json"      # manual/auto mode, written by the web
+SETTINGS_FILE = DATA_DIR / "settings.json"     # user-tweakable settings from the web
 LOG_FILE = DATA_DIR / "control.log"
 
 CODE_RE = re.compile(r"\(([0-9A-Fa-f]{4})\)")
@@ -139,6 +146,11 @@ def _schedule_tz():
         return None
 
 
+def now_local():
+    """Current time in the schedule timezone (drives the schedule + daily shutdown)."""
+    return datetime.now(_schedule_tz())
+
+
 def in_off_window(dt=None):
     """Return (off: bool, label: str) — whether the system should be OFF now."""
     if dt is None:
@@ -195,6 +207,34 @@ def write_override(mode, action=None):
     _write_json(OVERRIDE_FILE, {"mode": mode, "action": action, "ts": now_iso()})
 
 
+def read_settings():
+    return _read_json(SETTINGS_FILE, {})
+
+
+def write_settings(settings):
+    _write_json(SETTINGS_FILE, settings)
+
+
+def force_off_at_str():
+    """Effective daily force-off time as 'HH:MM' (web UI overrides env), '' if off."""
+    val = read_settings().get("force_off_at")
+    if val is None:  # not set in the UI -> fall back to the env default
+        val = FORCE_OFF_AT
+    return (val or "").strip()
+
+
+def force_off_time():
+    """Daily force-off time as a datetime.time, or None if disabled/unparseable."""
+    val = force_off_at_str()
+    if not val:
+        return None
+    try:
+        return _parse_hhmm(val)
+    except (ValueError, AttributeError):
+        logger.warning("Invalid force_off_at %r; daily shutdown disabled.", val)
+        return None
+
+
 # --- Gree AC helpers ---------------------------------------------------------
 
 async def discover_acs(wait=6):
@@ -241,11 +281,12 @@ async def query_ac_states(acs):
 # Re-export so callers can `from core import apply_action`.
 __all__ = [
     "ROOM_BY_CODE", "AC_BY_ROOM", "ON_THRESHOLD", "OFF_THRESHOLD",
-    "DATA_DIR", "STATE_FILE", "STATUS_FILE", "OVERRIDE_FILE", "LOG_FILE",
-    "SCHEDULE_TZ", "OFF_WEEKDAY", "OFF_WEEKEND",
-    "TEMP_RANGES", "clamp_temperature", "in_off_window",
+    "DATA_DIR", "STATE_FILE", "STATUS_FILE", "OVERRIDE_FILE", "SETTINGS_FILE",
+    "LOG_FILE", "SCHEDULE_TZ", "OFF_WEEKDAY", "OFF_WEEKEND", "FORCE_OFF_AT",
+    "TEMP_RANGES", "clamp_temperature", "in_off_window", "now_local",
     "logger", "now_iso", "room_for", "decide",
     "load_state", "save_state", "read_status", "write_status",
-    "read_override", "write_override",
+    "read_override", "write_override", "read_settings", "write_settings",
+    "force_off_at_str", "force_off_time",
     "discover_acs", "query_ac_states", "apply_action", "safe_close",
 ]
