@@ -36,7 +36,7 @@ from core import (
     now_iso, query_ac_states, read_override, read_status, room_for, save_state,
     write_status,
 )
-from humidity_sensors import DEFAULT_PREFIX, make_collector
+from humidity_sensors import DEFAULT_PREFIX, flush_bluez_cache, make_collector
 
 
 def build_targets(rooms, acs):
@@ -181,6 +181,10 @@ def parse_args():
     p.add_argument("--max-age", type=float, default=900.0, metavar="SECONDS",
                    help="ignore sensor readings older than this for decisions "
                         "(default: 900 = 15 min)")
+    p.add_argument("--flush-interval", type=float, default=10.0, metavar="SECONDS",
+                   help="evict sensors from the BlueZ cache this often so their "
+                        "readings can't freeze on a stale advertisement "
+                        "(default: 10; 0 = never)")
     p.add_argument("--ac-wait", type=int, default=6, metavar="SECONDS",
                    help="seconds to wait for AC discovery (default: 6)")
     p.add_argument("--prefix", default=DEFAULT_PREFIX,
@@ -218,9 +222,19 @@ async def main_async():
     ac_states = {}
     decisions = []
     next_decision = 0.0  # decide immediately on first tick
+    next_flush = 0.0 if args.flush_interval else None  # flush once at startup too
 
     try:
         while True:
+            if next_flush is not None and time.monotonic() >= next_flush:
+                try:
+                    removed = await flush_bluez_cache(args.prefix)
+                    if removed:
+                        logger.debug("Flushed BlueZ cache for: %s", ", ".join(removed))
+                except Exception as exc:  # never let a flush error kill the loop
+                    logger.warning("BlueZ cache flush failed: %s", exc)
+                next_flush = time.monotonic() + args.flush_interval
+
             rooms = snapshot_sensors(sensors, last_sensors, args.max_age)
 
             if time.monotonic() >= next_decision:

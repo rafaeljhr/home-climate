@@ -86,6 +86,46 @@ async def collect_readings(window=30.0, interval=0.5, prefix=DEFAULT_PREFIX, exp
     return sensors
 
 
+async def flush_bluez_cache(prefix=DEFAULT_PREFIX, adapter="hci0"):
+    """Evict matching sensors from BlueZ's device cache (return removed names).
+
+    On a long-running scan BlueZ refreshes a device's RSSI on every advertisement
+    but caches its ManufacturerData, so bleak keeps handing us a *stale* payload
+    while last_seen looks fresh — readings silently freeze. Removing the device
+    forces BlueZ to repopulate ManufacturerData from the next advertisement (which
+    the continuous scan picks up within a second or two). Best-effort: any error
+    (e.g. device already gone) is ignored.
+    """
+    from dbus_fast.aio import MessageBus
+    from dbus_fast.constants import BusType
+    from dbus_fast import Message
+
+    bus = await MessageBus(bus_type=BusType.SYSTEM).connect()
+    removed = []
+    try:
+        reply = await bus.call(Message(
+            destination="org.bluez", path="/",
+            interface="org.freedesktop.DBus.ObjectManager",
+            member="GetManagedObjects"))
+        adapter_path = f"/org/bluez/{adapter}"
+        for path, ifaces in reply.body[0].items():
+            dev = ifaces.get("org.bluez.Device1")
+            if not dev or not path.startswith(adapter_path):
+                continue
+            nv = dev.get("Name") or dev.get("Alias")
+            name = nv.value if nv is not None else ""
+            if not name.startswith(prefix):
+                continue
+            await bus.call(Message(
+                destination="org.bluez", path=adapter_path,
+                interface="org.bluez.Adapter1", member="RemoveDevice",
+                signature="o", body=[path]))
+            removed.append(name)
+    finally:
+        bus.disconnect()
+    return removed
+
+
 def render(sensors, elapsed, window):
     ts = datetime.now().strftime("%H:%M:%S")
     now = time.monotonic()

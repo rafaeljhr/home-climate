@@ -19,5 +19,6 @@ ENV DATA_DIR=/data
 VOLUME ["/data"]
 
 # -u = unbuffered, so `docker logs` shows output live.
-# Bluetooth scans continuously; defaults: refresh 1s, poll 30s, max-age 15min.
+# Bluetooth scans continuously; defaults: refresh 1s, poll 30s, max-age 15min,
+# BlueZ cache flush 10s (stops stale-advertisement readings from freezing).
 CMD ["python", "-u", "humidity_control.py"]
