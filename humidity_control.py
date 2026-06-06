@@ -94,6 +94,22 @@ def _is_manual_hold(ac):
     return bool(ac.get("power")) and str(ac.get("mode", "")).lower() != "dry"
 
 
+def _state_from_ac(ac):
+    """The controller state ('dry'/'off') a reachable AC is actually in, else None.
+
+    Used to hand control back smoothly: if you manually switch a unit to Dry or
+    Off, the hysteresis is re-seeded from that live state so automation continues
+    from where you left it (Dry keeps drying until ≤OFF%, Off stays off until
+    >ON%) instead of snapping to a stale earlier decision. Cool/Heat is treated as
+    a manual hold elsewhere and never reaches here.
+    """
+    if not ac or ac.get("error"):
+        return None
+    if not ac.get("power"):
+        return "off"
+    return "dry" if str(ac.get("mode", "")).lower() == "dry" else None
+
+
 def _force_off_due(prev_wall, now_wall):
     """True exactly once, when the wall clock crosses the daily force-off time.
 
@@ -214,6 +230,9 @@ async def decide_and_act(args, acs, state, rooms, ac_states, enforce_off=True,
                 mode = str((states[0] or {}).get("mode", "")).lower()
                 decisions.append(f"{label}: {humidity}% — manual {mode}, leaving alone")
                 continue
+            implied = {_state_from_ac(ac) for ac in states} - {None}
+            if len(implied) == 1:  # take over from the unit's live dry/off state
+                state[key] = implied.pop()
             desired = decide(humidity, state.get(key))
             decisions.append(await apply_target(
                 key, f"{label}: {humidity}%", desired, devices, state,
