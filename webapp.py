@@ -14,6 +14,7 @@ In Docker it listens on 0.0.0.0:8000 with host networking (http://<pi-ip>:8000).
 """
 
 import asyncio
+import base64
 import hmac
 import os
 import time
@@ -34,7 +35,7 @@ AUTH_ENABLED = bool(WEB_USER and WEB_PASSWORD)
 
 @app.before_request
 def _require_auth():
-    if not AUTH_ENABLED:
+    if not AUTH_ENABLED or request.path == "/apple-touch-icon.png":
         return None
     auth = request.authorization
     if (auth and hmac.compare_digest(auth.username or "", WEB_USER)
@@ -207,6 +208,17 @@ TEMPPRO_LOGO = (
     '</text></svg>'
 )
 
+# 180x180 PNG home-screen icon (droplet on brand blue). iOS uses apple-touch-icon
+# (PNG only — it ignores the SVG favicon), served at /apple-touch-icon.png.
+APPLE_ICON_PNG = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAALQAAAC0CAYAAAA9zQYyAAAFQ0lEQVR4nO3dQXLTShSFYTsFE3oRLIQMWBSsAhbFABbCIuQJA6hQlSrbseWW1K2+59z/m76C2NL/TjqOE46HID58+fl39GPANqfvz8fDYMMeAAH7Ow0IfNcPSMR5nXaKu/sHIWLsGXe3v5iQMSLs5n8hIWNk2E+HhogZo7tp8n8GISPKWm9eaGJGS1t72hQ0MaOHLV2tmndCRtQjyOKFJmbsaWlvi4ImZoywpLvqoIkZI9X21/R1aGC0qqBZZ0RQ0+HDoIkZkTzqcTZoYkZEc11yhoaVu0GzzojsXp83gyZmKLjVKUcOWHkTNOsMJde9stCwchE06wxF592y0LBC0PAMmuMGlL32y0LDCkHDL2iOG/1N3z7t8FFye+mYhd4xZqLuj6BhhaA7u15lVrqvJ87PcMJCd3RvjVnpfggaVgi6k0crzEr3QdCwQtAd1K4vK90eQcMKQTe2dHVZ6bYIGlYIuqG1a8tKt0PQsELQjWxdWVa6DYKGFYJuoNW6stLbETSsEHSwVWWltyFoWCHogGvKSq9H0LBC0EFXlJVeh6BhhaADrycrvRxBwwpBB19NVnoZgoYVghZYS1a6HkHDCkGLrOToj6+CoGGFoIXWMcrjiIygYYWgxVYx2uOJhqBhhaAF1zDq44qAoGGFoEVXMPrjG4WgYYWghddP5XHu6ci/guURSPn6a/RDCIGgxUO+VpKHnf7I4RSz4/NZKnXQrjd/Mn1eNVIeOTLd8JLsCJJuoTPFnPH5pgo6283N+LzTBJ3ppmZ+/imCznIzH8lwHeyDznATl5jMr4d10O43b63J+LrYBu1801qYTK+PbdDIyTJo1/VpbTK8TnZBO96kniaz62UVtNvN2ctkdN2sggZsgnZamREmk+tnEzRgE7TLuow2GVxHi6ABm6AdViWSSfx6ygcN2AStviZRTcLXVTpo4BpBw4ps0MqfFhVMotdXNmjgFoKGFcmgVT8dqpkEr7Nk0MA9BA0rBA0rBA0rckErfqGibBK73nJBA3MIGlYIGlYIGlYIGlYIGlYIGlYIGlYIGlYIGlYIGlbejX4ADn78/nP3v33++H7Xx5Kd5D+NHOUNM3Mhu4RdxP5pZRa6c8jXf0Y1bBWcoXeIueWfxzyCHhAjUfdD0IMiJOo+JINW+0JFVRG8zpJB763XmrLS7RE0rMgGvdenw94rGnWli+BxQzpo4BaChhXpoFU/LUZXhK+rdNCAXdDKaxJREb+e8kEDdkH3XJXe746L9O67Ir7ONkEDdkErrjTr3J5N0IBd0EorzTr3YRW0StTE3I9d0NGjJua++CHZDVFm+KlvNZK/xiDarztQ/L0cxeA153RBR/odHpEU05htz9BZbt4axfx62Aed4SbWKgmuQ4qgs9zMOVme/9Pp+/PxkESWm5r5eadZ6Iw3N+Pz/b/O7q90ZHwFpCQLOe1CZ7jpxfR5VQed6RztfvOL2fNZ4qVjvvV9FoHyESRzyOcIWjxsQr50cdTI+sXhPZHDJuRLr8dmFlpssQl5HkEvjGhE3ERc782rGxw76vWMm4jrnb9Kx0I3jm5N5MTbzs3Xn1lpqLj+Hkrq7xTCz82gM3/nEDpudXp3oYkakd3rkyMHrMwGzUojorkuHy40USOSRz1WHTmIGhHUdMgZGlaqg2alMVJtf4sWmqgxwpLuFh85iBp7Wtrbpu8I8p4P9LJ2ODd9Uchao4ctXW1+lYOo0dLWnpq+CYkjCEYPY9PXoVlrjO6m29tEWWuMGMDu73smbOz5mXzXN/ITd16nnX5oZNhPphC3v9OAn3z6B7T02+FN5qIAAAAAAElFTkSuQmCC"
+)
+
+
+@app.route("/apple-touch-icon.png")
+def apple_touch_icon():
+    return Response(APPLE_ICON_PNG, mimetype="image/png")
+
 
 PAGE = """<!doctype html>
 <html lang="en">
@@ -215,6 +227,11 @@ PAGE = """<!doctype html>
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <noscript><meta http-equiv="refresh" content="15"></noscript>
   <title>Home Climate</title>
+  <!-- iOS home-screen icon (PNG; iOS ignores the SVG favicon) + web-app chrome. -->
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="Climate">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <!-- Self-contained tab icon: a humidity droplet in the brand blue (inline SVG, no external asset). -->
   <link rel="icon" type="image/svg+xml" href="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAzMiAzMiI+PHJlY3Qgd2lkdGg9IjMyIiBoZWlnaHQ9IjMyIiByeD0iNyIgZmlsbD0iIzBhNzRjNCIvPjxwYXRoIGQ9Ik0xNiA1LjVjMCAwLTcuNSA4LjItNy41IDEzLjRhNy41IDcuNSAwIDAgMCAxNSAwQzIzLjUgMTMuNyAxNiA1LjUgMTYgNS41WiIgZmlsbD0iI2ZmZmZmZiIvPjxjaXJjbGUgY3g9IjEzIiBjeT0iMTkuNSIgcj0iMi4zIiBmaWxsPSIjYmZlMGZhIi8+PC9zdmc+">
   <style>
