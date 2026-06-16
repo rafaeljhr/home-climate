@@ -45,7 +45,7 @@ AC_BY_ROOM = {
 }
 
 # Humidity thresholds (%RH), configurable via env on the controller.
-ON_THRESHOLD = int(os.environ.get("HUMIDITY_ON", "65"))   # strictly above -> Dry
+ON_THRESHOLD = int(os.environ.get("HUMIDITY_ON", "65"))   # at or above -> Dry
 OFF_THRESHOLD = int(os.environ.get("HUMIDITY_OFF", "55"))  # at or below -> Off
 
 # --- OFF schedule (configurable via env vars on the controller) --------------
@@ -108,7 +108,7 @@ def room_for(name):
 
 def decide(humidity, previous):
     """Hysteresis: 'dry', 'off', or hold `previous` in the dead band."""
-    if humidity > ON_THRESHOLD:
+    if humidity >= ON_THRESHOLD:
         return "dry"
     if humidity <= OFF_THRESHOLD:
         return "off"

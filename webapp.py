@@ -103,7 +103,7 @@ def tail_log(n=80):
 def humidity_class(humidity, thresholds):
     if humidity is None:
         return ""
-    if humidity > thresholds.get("on", core.ON_THRESHOLD):
+    if humidity >= thresholds.get("on", core.ON_THRESHOLD):
         return "hi-dry"
     if humidity <= thresholds.get("off", core.OFF_THRESHOLD):
         return "hi-off"
@@ -167,7 +167,7 @@ def collect():
 
     if status:
         meta = (f"Updated {age_str(status.get('updated_at'))} · {status.get('control_mode', '')}"
-                f" · dry >{thresholds['on']}% , off ≤{thresholds['off']}%")
+                f" · dry ≥{thresholds['on']}% , off ≤{thresholds['off']}%")
         if status.get("dry_run"):
             meta += " · DRY-RUN"
     else:
