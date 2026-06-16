@@ -18,11 +18,11 @@ services:
       # Periods when the system is OFF (ACs forced off). Outside these, the
       # humidity automation runs. Comma-separated HH:MM-HH:MM ranges; add as
       # many as you like; windows may cross midnight (e.g. 22:00-10:00).
-      - OFF_WEEKDAY=13:00-17:00,22:00-10:00
-      - OFF_WEEKEND=22:00-11:00,13:00-17:00
+      - OFF_WEEKDAY=22:00-10:00
+      - OFF_WEEKEND=22:00-11:00
       # Humidity thresholds (%RH): above ON -> Dry, at/below OFF -> Off.
       - HUMIDITY_ON=65
-      - HUMIDITY_OFF=54
+      - HUMIDITY_OFF=55
       # Daily hard shutdown: forces EVERY AC off once at this time (HH:MM),
       # overriding manual Cool/Heat — a backstop for units left on. Empty
       # disables it. Can also be changed live in the web UI (which wins).

@@ -33,8 +33,9 @@ from core import (
     AC_BY_ROOM, OFF_THRESHOLD, OFF_WEEKDAY, OFF_WEEKEND, ON_THRESHOLD,
     ROOM_BY_CODE, SCHEDULE_TZ,
     apply_action, decide, discover_acs, force_off_at_str, force_off_time,
-    in_off_window, load_state, logger, now_iso, now_local, query_ac_states,
-    read_override, read_status, room_for, save_state, write_status,
+    in_off_window, laundry_status, load_state, logger, now_iso, now_local,
+    query_ac_states, read_laundry, read_override, read_status, room_for,
+    save_state, write_laundry, write_status,
 )
 from humidity_sensors import DEFAULT_PREFIX, flush_bluez_cache, make_collector
 
@@ -175,12 +176,57 @@ def snapshot_sensors(sensors, last_sensors, max_age):
     return fresh
 
 
+async def handle_laundry(args, acs, ac_states):
+    """Keep the laundry room's AC in Dry @ its set temp while a session is active.
+
+    Laundry mode is the highest precedence and is Bedroom-only by default: it
+    overrides the OFF schedule, the daily force-off and humidity logic. It does
+    NOT auto-off — when the timer ends it just clears, and normal automation
+    takes the unit back over from its live state. Returns (laundry_mac, log_line):
+    laundry_mac is the unit the controller should leave out of normal logic this
+    cycle (None when no session is active).
+    """
+    laundry = read_laundry()
+    if not laundry.get("active"):
+        return None, None
+
+    room = laundry.get("room", "Bedroom")
+    mac = AC_BY_ROOM.get(room)
+    try:
+        until_dt = datetime.fromisoformat(laundry["until"])
+    except (KeyError, TypeError, ValueError):
+        until_dt = None
+
+    if until_dt is None or now_local() >= until_dt:
+        write_laundry({"active": False})
+        return None, f"laundry ({room}) finished — back to automation"
+
+    remaining = int((until_dt - now_local()).total_seconds() // 60)
+    temp = int(laundry.get("temp", 16))
+    device = acs.get(mac)
+    if device is None:
+        return mac, f"laundry ({room}) — AC not found ({remaining}min left)"
+
+    ac = ac_states.get(mac) or {}
+    in_state = (bool(ac.get("power")) and str(ac.get("mode", "")).lower() == "dry"
+                and ac.get("target_temp") == temp)
+    if in_state:
+        return mac, f"laundry ({room}) — Dry {temp}°C, {remaining}min left"
+    if args.dry_run:
+        return mac, f"laundry ({room}) => WOULD set Dry {temp}°C ({remaining}min left)"
+    try:
+        msg = await apply_action(device, "laundry", temp)
+        return mac, f"laundry ({room}) => {msg} ({remaining}min left)"
+    except Exception as exc:
+        return mac, f"laundry ({room}) => FAILED: {exc}"
+
+
 async def decide_and_act(args, acs, state, rooms, ac_states, enforce_off=True,
                          force_off=False):
     """Run the control logic once and return the list of decision log lines.
 
-    Precedence: daily force-off > manual override > OFF schedule > humidity logic.
-    Actuation is reconciled against the live AC states in `ac_states`.
+    Precedence: laundry > daily force-off > manual override > OFF schedule >
+    humidity logic. Actuation is reconciled against the live AC states.
 
     `enforce_off` is True only on the cycle the OFF window is first entered: the
     schedule forces every unit off then. On later cycles it's False, so a unit a
@@ -189,11 +235,21 @@ async def decide_and_act(args, acs, state, rooms, ac_states, enforce_off=True,
 
     `force_off` is True for the single cycle the daily force-off time is crossed:
     every AC is turned off unconditionally, overriding manual Cool/Heat and any
-    pause — the backstop for units left on.
+    pause — the backstop for units left on (laundry mode excepted).
     """
+    decisions = []
+
+    # Laundry mode (Bedroom-only) outranks everything; its unit is left out of
+    # the normal logic below for this cycle.
+    laundry_mac, laundry_line = await handle_laundry(args, acs, ac_states)
+    if laundry_line:
+        decisions.append(laundry_line)
+    if laundry_mac is not None:
+        acs = {m: d for m, d in acs.items() if m != laundry_mac}
+        rooms = {r: h for r, h in rooms.items() if AC_BY_ROOM.get(r) != laundry_mac}
+
     override = read_override()
     off_now, _ = in_off_window()
-    decisions = []
 
     if force_off:
         hhmm = force_off_at_str()
@@ -346,6 +402,7 @@ async def main_async():
                     "weekday_off": OFF_WEEKDAY, "weekend_off": OFF_WEEKEND,
                     "force_off_at": force_off_at_str(),
                 },
+                "laundry": laundry_status(),
                 "sensors": last_sensors,
                 "acs": ac_states,
                 "decisions": decisions,

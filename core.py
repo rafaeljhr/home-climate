@@ -46,7 +46,7 @@ AC_BY_ROOM = {
 
 # Humidity thresholds (%RH), configurable via env on the controller.
 ON_THRESHOLD = int(os.environ.get("HUMIDITY_ON", "65"))   # strictly above -> Dry
-OFF_THRESHOLD = int(os.environ.get("HUMIDITY_OFF", "54"))  # at or below -> Off
+OFF_THRESHOLD = int(os.environ.get("HUMIDITY_OFF", "55"))  # at or below -> Off
 
 # --- OFF schedule (configurable via env vars on the controller) --------------
 #
@@ -55,8 +55,8 @@ OFF_THRESHOLD = int(os.environ.get("HUMIDITY_OFF", "54"))  # at or below -> Off
 # HH:MM-HH:MM ranges in SCHEDULE_TZ; add as many as you like. Windows may cross
 # midnight (e.g. 22:00-10:00). An empty spec means "never off" for that day type.
 SCHEDULE_TZ = os.environ.get("SCHEDULE_TZ", "Europe/Lisbon")
-OFF_WEEKDAY = os.environ.get("OFF_WEEKDAY", "13:00-17:00,22:00-10:00")
-OFF_WEEKEND = os.environ.get("OFF_WEEKEND", "22:00-11:00,13:00-17:00")
+OFF_WEEKDAY = os.environ.get("OFF_WEEKDAY", "22:00-10:00")
+OFF_WEEKEND = os.environ.get("OFF_WEEKEND", "22:00-11:00")
 
 # Daily hard shutdown (HH:MM in SCHEDULE_TZ): forces EVERY AC off once at this
 # time, overriding manual Cool/Heat and any pause — a backstop for units left on
@@ -71,6 +71,7 @@ STATE_FILE = DATA_DIR / "control_state.json"   # hysteresis state, keyed per tar
 STATUS_FILE = DATA_DIR / "status.json"         # snapshot the web UI reads
 OVERRIDE_FILE = DATA_DIR / "override.json"      # manual/auto mode, written by the web
 SETTINGS_FILE = DATA_DIR / "settings.json"     # user-tweakable settings from the web
+LAUNDRY_FILE = DATA_DIR / "laundry.json"       # active laundry-mode session (web-driven)
 LOG_FILE = DATA_DIR / "control.log"
 
 CODE_RE = re.compile(r"\(([0-9A-Fa-f]{4})\)")
@@ -215,6 +216,35 @@ def write_settings(settings):
     _write_json(SETTINGS_FILE, settings)
 
 
+def read_laundry():
+    return _read_json(LAUNDRY_FILE, {"active": False})
+
+
+def write_laundry(laundry):
+    _write_json(LAUNDRY_FILE, laundry)
+
+
+def laundry_status():
+    """Current laundry session as a display dict; {'active': False} if none/expired."""
+    laundry = read_laundry()
+    if not laundry.get("active"):
+        return {"active": False}
+    try:
+        until_dt = datetime.fromisoformat(laundry["until"])
+    except (KeyError, TypeError, ValueError):
+        return {"active": False}
+    remaining = (until_dt - now_local()).total_seconds()
+    if remaining <= 0:
+        return {"active": False}
+    return {
+        "active": True,
+        "room": laundry.get("room"),
+        "temp": laundry.get("temp"),
+        "until": laundry["until"],
+        "remaining_min": int(remaining // 60),
+    }
+
+
 def force_off_at_str():
     """Effective daily force-off time as 'HH:MM' (web UI overrides env), '' if off."""
     val = read_settings().get("force_off_at")
@@ -287,6 +317,7 @@ __all__ = [
     "logger", "now_iso", "room_for", "decide",
     "load_state", "save_state", "read_status", "write_status",
     "read_override", "write_override", "read_settings", "write_settings",
+    "read_laundry", "write_laundry", "laundry_status",
     "force_off_at_str", "force_off_time",
     "discover_acs", "query_ac_states", "apply_action", "safe_close",
 ]

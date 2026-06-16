@@ -17,7 +17,7 @@ import asyncio
 import hmac
 import os
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from flask import (Flask, Response, jsonify, redirect, render_template_string,
                    request, url_for)
@@ -61,6 +61,14 @@ def _expected_state(act, temp):
 TEMP_OPTIONS = {mode: list(range(lo, hi + 1)) for mode, (lo, hi) in core.TEMP_RANGES.items()}
 TEMP_DEFAULTS = {mode: core.clamp_temperature(mode, None) for mode in core.TEMP_RANGES}
 ROOM_BY_AC = {mac: room for room, mac in core.AC_BY_ROOM.items()}
+
+# Laundry mode (Bedroom only): Dry at 16–24°C for 1–24h, overrides everything.
+LAUNDRY_ROOM = "Bedroom"
+LAUNDRY_MAC = core.AC_BY_ROOM.get(LAUNDRY_ROOM)
+LAUNDRY_TEMPS = list(range(16, 25))      # 16..24 °C
+LAUNDRY_HOURS = list(range(1, 25))       # 1..24 h
+LAUNDRY_DEFAULT_TEMP = 16
+LAUNDRY_DEFAULT_HOURS = 6
 
 
 def get_acs(force=False):
@@ -179,6 +187,7 @@ def collect():
     return {
         "pill_cls": pill_cls, "pill_text": pill_text, "meta": meta, "schedule": schedule,
         "manual": override.get("mode") == "manual", "force_off_at": force_off_at,
+        "laundry": core.laundry_status(),
         "sensors": sensors, "acs": acs, "log": tail_log(),
     }
 
@@ -385,6 +394,32 @@ PAGE = """<!doctype html>
     <div class="top"><span class="room">All ACs</span></div>
     <div class="controls" style="margin-top:.6rem">{{ controls('all') }}</div>
   </div>
+
+  <div class="card laundry" style="margin-bottom:.8rem">
+    <div class="top"><span class="room">&#129532; Laundry mode &middot; Bedroom</span>
+      <span class="pill {{ 'amber dot' if snap.laundry.active else 'off' }}" id="laundry-pill">{{ 'RUNNING' if snap.laundry.active else 'off' }}</span>
+    </div>
+    <div class="sub" style="margin:.35rem 0 .6rem">
+      Dry at a low temperature for a set time. Overrides the schedule, the daily
+      shut-off and humidity. When the timer ends it hands the AC back to automation
+      (no forced off).
+    </div>
+    <div id="laundry-active"{% if not snap.laundry.active %} hidden{% endif %}>
+      <div class="state" id="laundry-info">Dry <b>{{ snap.laundry.temp }}</b>&deg;C &middot; <b>{{ snap.laundry.remaining_min }}</b> min left</div>
+      <form class="laundryform" method="post" action="/laundry/stop" style="margin-top:.5rem">
+        <button class="b-off">Stop laundry</button>
+      </form>
+    </div>
+    <form id="laundry-idle" class="laundryform" method="post" action="/laundry/start"{% if snap.laundry.active %} hidden{% endif %}
+          style="display:flex;gap:.5rem;align-items:center;flex-wrap:wrap">
+      <span class="sub">Dry at</span>
+      <select name="temp">{% for t in laundry_temps %}<option value="{{ t }}"{% if t == laundry_default_temp %} selected{% endif %}>{{ t }}&deg;C</option>{% endfor %}</select>
+      <span class="sub">for</span>
+      <select name="hours">{% for h in laundry_hours %}<option value="{{ h }}"{% if h == laundry_default_hours %} selected{% endif %}>{{ h }}h</option>{% endfor %}</select>
+      <button class="b-dry">Start laundry</button>
+    </form>
+  </div>
+
   <div class="grid">
     {% for a in snap.acs %}
       <div class="card ac">
@@ -448,6 +483,18 @@ async function update() {
         + (a.target_temp ? ' &middot; target <b>' + esc(a.target_temp) + '&deg;C</b>' : '');
   });
 
+  const L = d.laundry || { active: false };
+  document.getElementById('laundry-active').hidden = !L.active;
+  document.getElementById('laundry-idle').hidden = L.active;
+  const lp = document.getElementById('laundry-pill');
+  lp.className = 'pill ' + (L.active ? 'amber dot' : 'off');
+  lp.textContent = L.active ? 'RUNNING' : 'off';
+  if (L.active) {
+    const mins = L.remaining_min || 0, h = Math.floor(mins / 60), m = mins % 60;
+    document.getElementById('laundry-info').innerHTML =
+      'Dry <b>' + esc(L.temp) + '</b>&deg;C &middot; <b>' + (h ? h + 'h ' : '') + m + 'm</b> left';
+  }
+
   const log = document.getElementById('log');
   const atBottom = log.scrollTop + log.clientHeight >= log.scrollHeight - 4;
   log.textContent = d.log.join('\\n');
@@ -465,20 +512,21 @@ function toast(msg, ok) {
   toastTimer = setTimeout(() => { t.className = 'toast'; }, 3200);
 }
 
-// Post control actions via fetch so the page doesn't reload (keeps dropdowns).
-// NOTE: post to the literal '/action' — a hidden <input name="action"> shadows
-// the form's own .action property in the DOM, so f.action is NOT the URL.
+// Post forms via fetch so the page doesn't reload (keeps dropdowns).
+// NOTE: use getAttribute('action') — a hidden <input name="action"> shadows the
+// form's own .action property in the DOM, so f.action is NOT the URL.
 async function postForm(f, btn) {
+  const url = f.getAttribute('action') || '/action';
   // "thinking" UI: disable this card's controls + spinner on the clicked button
   const scope = f.closest('.card') || f;
   const buttons = scope.querySelectorAll('button');
   buttons.forEach((b) => { b.disabled = true; });
   if (btn) btn.classList.add('busy');
-  toast('Sending to the AC…', true);
+  toast('Working…', true);
 
   let data = {};
   try {
-    const res = await fetch('/action', {
+    const res = await fetch(url, {
       method: 'POST',
       headers: { 'X-Requested-With': 'fetch' },
       body: new FormData(f),
@@ -495,7 +543,7 @@ async function postForm(f, btn) {
 }
 document.addEventListener('submit', (e) => {
   const f = e.target;
-  if (!f.matches('form.ctl, #resume')) return;
+  if (!f.matches('form.ctl, #resume, .laundryform')) return;
   e.preventDefault();
   postForm(f, e.submitter);
 });
@@ -511,6 +559,8 @@ def index():
     return render_template_string(
         PAGE, snap=collect(), force_off_at=core.force_off_at_str(),
         temp_options=TEMP_OPTIONS, temp_defaults=TEMP_DEFAULTS,
+        laundry_temps=LAUNDRY_TEMPS, laundry_hours=LAUNDRY_HOURS,
+        laundry_default_temp=LAUNDRY_DEFAULT_TEMP, laundry_default_hours=LAUNDRY_DEFAULT_HOURS,
         gree_logo=GREE_LOGO, temppro_logo=TEMPPRO_LOGO,
     )
 
@@ -578,6 +628,40 @@ def action():
     if errors:
         return _respond(True, f"{label} sent (some ACs failed)")
     return _respond(True, f"{label} sent — automation paused")
+
+
+@app.route("/laundry/start", methods=["POST"])
+def laundry_start():
+    if not LAUNDRY_MAC:
+        return _respond(False, "No Bedroom AC configured")
+    temp = max(16, min(24, request.form.get("temp", type=int) or LAUNDRY_DEFAULT_TEMP))
+    hours = max(1, min(24, request.form.get("hours", type=int) or LAUNDRY_DEFAULT_HOURS))
+
+    acs = get_acs()
+    if LAUNDRY_MAC not in acs:
+        acs = get_acs(force=True)
+    if LAUNDRY_MAC not in acs:
+        return _respond(False, "Bedroom AC not found on the network")
+
+    try:
+        asyncio.run(core.apply_action(acs[LAUNDRY_MAC], "laundry", temp))
+    except Exception as exc:
+        return _respond(False, f"Could not start laundry: {exc}")
+
+    until = (core.now_local() + timedelta(hours=hours)).isoformat(timespec="seconds")
+    core.write_laundry({"active": True, "room": LAUNDRY_ROOM, "mac": LAUNDRY_MAC,
+                        "temp": temp, "until": until, "started": core.now_iso()})
+    _optimistic[LAUNDRY_MAC] = {"power": True, "mode": "Dry", "target_temp": temp,
+                                "ts": time.time()}
+    core.logger.info("Web: laundry START %s Dry %s°C for %sh", LAUNDRY_ROOM, temp, hours)
+    return _respond(True, f"Laundry started — Dry {temp}°C for {hours}h")
+
+
+@app.route("/laundry/stop", methods=["POST"])
+def laundry_stop():
+    core.write_laundry({"active": False})
+    core.logger.info("Web: laundry STOP — back to automation")
+    return _respond(True, "Laundry stopped — automation resumes")
 
 
 @app.route("/settings", methods=["POST"])

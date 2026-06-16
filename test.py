@@ -12,9 +12,12 @@ TEMP_RANGES = {
     "dry": (20, 24),
     "cool": (20, 24),
     "heat": (26, 30),
+    "laundry": (16, 24),  # Dry mode, but down to the AC's 16°C minimum
 }
-DEFAULT_TEMP = {"dry": 20, "cool": 22, "heat": 26}
-MODE_BY_ACTION = {"cool": Mode.Cool, "dry": Mode.Dry, "heat": Mode.Heat}
+DEFAULT_TEMP = {"dry": 20, "cool": 22, "heat": 26, "laundry": 16}
+MODE_BY_ACTION = {
+    "cool": Mode.Cool, "dry": Mode.Dry, "heat": Mode.Heat, "laundry": Mode.Dry,
+}
 
 
 def clamp_temperature(action: str, temperature) -> int:
