@@ -31,11 +31,9 @@ services:
       - data:/data
       # Talk to the host's BlueZ over D-Bus for Bluetooth scanning.
       - /run/dbus:/run/dbus:ro
-    cap_add:
-      - NET_ADMIN
-      - NET_RAW
-    # If Bluetooth scanning fails with a D-Bus/permission error, swap the two
-    # lines above for:  privileged: true
+    # Bluetooth scanning on the Pi needs broad device access; privileged is the
+    # reliable option (cap_add NET_ADMIN/NET_RAW was not enough on Pi OS).
+    privileged: true
 
   web:
     build:
