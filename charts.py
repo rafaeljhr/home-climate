@@ -142,6 +142,83 @@ def runtime_today(samples, rooms, tz, now):
     return rt.get(now.astimezone(tz).date(), {})
 
 
+def compute_runtime_by_mode(samples, rooms, tz, cap_min=10.0):
+    """{local_date: {room: {mode: minutes}}} — run-time split by AC mode."""
+    rows = _parsed(samples)
+    out = {}
+    for i in range(len(rows) - 1):
+        t0, s0 = rows[i]
+        dt_min = (rows[i + 1][0] - t0).total_seconds() / 60.0
+        if dt_min <= 0:
+            continue
+        dt_min = min(dt_min, cap_min)
+        day = t0.astimezone(tz).date()
+        ac = s0.get("ac", {})
+        for room in rooms:
+            mode = ac.get(room)
+            if mode and mode not in _OFF_MODES:
+                out.setdefault(day, {}).setdefault(room, {}).setdefault(mode, 0.0)
+                out[day][room][mode] += dt_min
+    return out
+
+
+def compute_energy(samples, rooms, tz, watts):
+    """{local_date: {room: kWh}} estimated from per-mode minutes x per-mode watts."""
+    by_mode = compute_runtime_by_mode(samples, rooms, tz)
+    default_w = watts.get("cool", 0.0)
+    out = {}
+    for day, rmap in by_mode.items():
+        for room, modes in rmap.items():
+            kwh = sum((mins / 60.0) * watts.get(mode, default_w) / 1000.0
+                      for mode, mins in modes.items())
+            out.setdefault(day, {})[room] = kwh
+    return out
+
+
+def energy_svg(samples, rooms, tz, days, now, watts):
+    """Grouped bar chart: estimated energy (kWh) per day, one bar per room."""
+    en = compute_energy(samples, rooms, tz, watts)
+    today = now.astimezone(tz).date()
+    day_list = [today - timedelta(days=i) for i in range(days - 1, -1, -1)]
+    W, H, L, R, T, B = 960, 230, 36, 10, 12, 26
+    x0, x1, y0, y1 = L, W - R, T, H - B
+    max_k = max([0.001] + [en.get(d, {}).get(r, 0.0) for d in day_list for r in rooms])
+    cmap = color_map(rooms)
+
+    p = [f'<svg viewBox="0 0 {W} {H}" class="chart" preserveAspectRatio="none" '
+         'role="img" aria-label="Estimated energy per day">']
+    nt = 4
+    for k in range(nt + 1):
+        v = max_k * k / nt
+        y = round(y0 + (y1 - y0) * (1 - k / nt), 1)
+        p.append(f'<line x1="{x0}" y1="{y}" x2="{x1}" y2="{y}" '
+                 'style="stroke:var(--border)" stroke-width="1"/>')
+        p.append(f'<text x="{x0 - 4}" y="{y + 3}" text-anchor="end" '
+                 f'style="fill:var(--muted)" font-size="9">{v:.1f}</text>')
+    n = len(day_list)
+    gw = (x1 - x0) / n
+    nb = max(1, len(rooms))
+    bw = min(20.0, (gw * 0.72) / nb)
+    for gi, d in enumerate(day_list):
+        gx = x0 + gw * gi
+        start = gx + (gw - bw * nb) / 2
+        for bi, room in enumerate(rooms):
+            val = en.get(d, {}).get(room, 0.0)
+            bh = (y1 - y0) * (val / max_k)
+            bx = round(start + bw * bi, 1)
+            if bh >= 0.5:
+                p.append(f'<rect x="{bx}" y="{round(y1 - bh, 1)}" '
+                         f'width="{round(bw - 1, 1)}" height="{round(bh, 1)}" '
+                         f'fill="{cmap[room]}" rx="1"/>')
+        p.append(f'<text x="{round(gx + gw / 2, 1)}" y="{y1 + 14}" '
+                 f'text-anchor="middle" style="fill:var(--muted)" '
+                 f'font-size="9">{d.strftime("%a %d")}</text>')
+    p.append(f'<line x1="{x0}" y1="{y1}" x2="{x1}" y2="{y1}" '
+             'style="stroke:var(--muted)" stroke-width="1"/>')
+    p.append("</svg>")
+    return "".join(p)
+
+
 def runtime_svg(samples, rooms, tz, days, now):
     """Grouped bar chart: AC run-time (hours) per day, one bar per room."""
     rt = compute_runtime(samples, rooms, tz)

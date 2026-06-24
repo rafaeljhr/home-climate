@@ -64,6 +64,16 @@ OFF_WEEKEND = os.environ.get("OFF_WEEKEND", "22:00-11:00")
 # web UI (stored in settings.json), which takes precedence over this env default.
 FORCE_OFF_AT = os.environ.get("FORCE_OFF_AT", "02:00")
 
+# Estimated average power draw per AC mode (watts), for the energy ESTIMATE chart.
+# The units don't report real consumption, so these are modeled from the Gree
+# Pular 9000 (GWH09) rated input (cool ~780 W, heat ~750 W) with Dry estimated
+# (it cycles the compressor low). Override per home via env / a plug meter.
+ENERGY_WATTS = {
+    "cool": float(os.environ.get("WATT_COOL", "780")),
+    "dry": float(os.environ.get("WATT_DRY", "300")),
+    "heat": float(os.environ.get("WATT_HEAT", "750")),
+}
+
 # All persisted state lives under DATA_DIR (a shared Docker volume in production).
 DATA_DIR = Path(os.environ.get("DATA_DIR", Path(__file__).with_name("data")))
 DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -431,6 +441,7 @@ __all__ = [
     "ROOM_BY_CODE", "AC_BY_ROOM", "ON_THRESHOLD", "OFF_THRESHOLD",
     "DATA_DIR", "STATE_FILE", "STATUS_FILE", "OVERRIDE_FILE", "SETTINGS_FILE",
     "LOG_FILE", "SCHEDULE_TZ", "OFF_WEEKDAY", "OFF_WEEKEND", "FORCE_OFF_AT",
+    "ENERGY_WATTS",
     "TEMP_RANGES", "clamp_temperature", "in_off_window", "now_local", "now_utc",
     "METRICS_FILE", "append_metric", "read_metrics", "backfill_metrics_from_logs",
     "logger", "now_iso", "room_for", "decide",

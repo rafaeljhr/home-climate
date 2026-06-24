@@ -55,6 +55,12 @@ services:
       # Note: Basic auth is not encrypted without HTTPS — fine on a trusted LAN.
       - WEB_USER=${WEB_USER:-}
       - WEB_PASSWORD=${WEB_PASSWORD:-}
+      # Estimated average power per AC mode (W) for the energy-estimate chart.
+      # Defaults model the Gree Pular 9000 (cool ~780, heat ~750; dry estimated).
+      # Refine from a plug meter if you want a closer estimate.
+      - WATT_COOL=780
+      - WATT_DRY=300
+      - WATT_HEAT=750
     volumes:
       - data:/data
     depends_on:

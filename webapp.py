@@ -209,10 +209,15 @@ def trends(days):
     status = core.read_status()
     th = status.get("thresholds", {"on": core.ON_THRESHOLD, "off": core.OFF_THRESHOLD})
     sensors = status.get("sensors", {})
+    watts = core.ENERGY_WATTS
     today_rt = charts.runtime_today(samples, rooms, tz, now)
+    energy = charts.compute_energy(samples, rooms, tz, watts)
+    today = now.astimezone(tz).date()
+    energy_today_room = energy.get(today, {})
     summary = [{
         "room": r, "color": cmap[r],
         "runtime": f"{today_rt.get(r, 0.0) / 60:.1f}h",
+        "energy": f"{energy_today_room.get(r, 0.0):.2f}",
         "humidity": sensors.get(r, {}).get("humidity"),
     } for r in rooms]
     return {
@@ -221,7 +226,11 @@ def trends(days):
         "legend": [{"room": r, "color": cmap[r]} for r in rooms],
         "humidity_svg": charts.humidity_svg(samples, rooms, tz, days, th["on"], th["off"], now),
         "runtime_svg": charts.runtime_svg(samples, rooms, tz, days, now),
+        "energy_svg": charts.energy_svg(samples, rooms, tz, days, now, watts),
         "summary": summary,
+        "watts": watts,
+        "energy_today": f"{sum(energy_today_room.values()):.2f}",
+        "energy_window": f"{sum(sum(d.values()) for d in energy.values()):.1f}",
     }
 
 
@@ -361,6 +370,7 @@ PAGE = """<!doctype html>
     .trend-title { font-size:.76rem; color:var(--muted); font-weight:600; margin-bottom:.25rem; }
     .summary { display:flex; gap:.6rem; flex-wrap:wrap; margin-top:.2rem; }
     .sumcard { border:1px solid var(--border); border-radius:10px; padding:.4rem .65rem; }
+    .estimate { font-style:italic; margin-top:.35rem; line-height:1.5; }
     .help { font-size:.88rem; color:var(--muted); }
     .help p { margin:.55rem 0; line-height:1.55; }
     .help ul { margin:.4rem 0 .55rem 1.1rem; line-height:1.55; }
@@ -528,11 +538,16 @@ PAGE = """<!doctype html>
       <div class="trend-title">AC run-time per day (hours)</div>
       {{ trends.runtime_svg|safe }}
     </div>
+    <div class="trend">
+      <div class="trend-title">Estimated energy per day (kWh) &middot; today ~{{ trends.energy_today }} kWh, last {{ trends.days }}d ~{{ trends.energy_window }} kWh</div>
+      {{ trends.energy_svg|safe }}
+      <div class="sub estimate">Estimate only — the ACs don't report real consumption. Modeled from Gree Pular 9000 rated input: cool ~{{ trends.watts.cool|int }} W, heat ~{{ trends.watts.heat|int }} W, dry ~{{ trends.watts.dry|int }} W (Dry is a guess; inverters modulate). Set WATT_COOL/WATT_DRY/WATT_HEAT to refine from a plug meter.</div>
+    </div>
     <div class="summary">
       {% for s in trends.summary %}
       <div class="sumcard">
         <span class="lg"><i style="background:{{ s.color }}"></i>{{ s.room }}</span>
-        <div class="sub">now {{ s.humidity if s.humidity is not none else '—' }}%RH &middot; ran {{ s.runtime }} today</div>
+        <div class="sub">now {{ s.humidity if s.humidity is not none else '—' }}%RH &middot; ran {{ s.runtime }} &middot; ~{{ s.energy }} kWh today</div>
       </div>
       {% endfor %}
     </div>
