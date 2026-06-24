@@ -34,6 +34,13 @@ services:
     # Bluetooth scanning on the Pi needs broad device access; privileged is the
     # reliable option (cap_add NET_ADMIN/NET_RAW was not enough on Pi OS).
     privileged: true
+    # Cap Docker's stdout capture so it can't fill the SD card (default is
+    # unbounded). The decision log under /data has its own 7-day rotation.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
   web:
     build:
@@ -52,6 +59,11 @@ services:
       - data:/data
     depends_on:
       - controller
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
 volumes:
   data:

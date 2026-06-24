@@ -13,7 +13,7 @@ import re
 import tempfile
 from datetime import datetime, time as dtime, timezone
 from ipaddress import IPv4Address
-from logging.handlers import RotatingFileHandler
+from logging.handlers import TimedRotatingFileHandler
 from pathlib import Path
 
 try:
@@ -86,7 +86,9 @@ logger = logging.getLogger("humctl")
 if not logger.handlers:
     logger.setLevel(logging.INFO)
     _fmt = logging.Formatter("%(asctime)s  %(message)s", "%Y-%m-%d %H:%M:%S")
-    _file = RotatingFileHandler(LOG_FILE, maxBytes=512_000, backupCount=2)
+    # Roll the decision log at local midnight and keep 7 days of history, so it's
+    # bounded (~1 MB/day here) and can never fill the disk.
+    _file = TimedRotatingFileHandler(LOG_FILE, when="midnight", backupCount=7)
     _file.setFormatter(_fmt)
     _stream = logging.StreamHandler()
     _stream.setFormatter(_fmt)
