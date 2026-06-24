@@ -13,8 +13,8 @@ RUN apt-get update \
 COPY requirements-web.txt .
 RUN pip install --no-cache-dir -r requirements-web.txt
 
-# core.py imports test.py; webapp.py imports core. No bleak / humidity_sensors needed.
-COPY core.py test.py webapp.py ./
+# core.py imports test.py; webapp.py imports core + charts. No bleak needed.
+COPY core.py test.py charts.py webapp.py ./
 
 ENV DATA_DIR=/data
 EXPOSE 8000

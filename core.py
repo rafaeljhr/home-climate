@@ -11,7 +11,7 @@ import logging
 import os
 import re
 import tempfile
-from datetime import datetime, time as dtime, timezone
+from datetime import datetime, time as dtime, timedelta, timezone
 from ipaddress import IPv4Address
 from logging.handlers import TimedRotatingFileHandler
 from pathlib import Path
@@ -73,6 +73,8 @@ OVERRIDE_FILE = DATA_DIR / "override.json"      # manual/auto mode, written by t
 SETTINGS_FILE = DATA_DIR / "settings.json"     # user-tweakable settings from the web
 LAUNDRY_FILE = DATA_DIR / "laundry.json"       # active laundry-mode session (web-driven)
 LOG_FILE = DATA_DIR / "control.log"
+METRICS_FILE = DATA_DIR / "metrics.jsonl"      # time-series for the trend charts
+METRICS_MAX_BYTES = 1_500_000                  # ~ a few weeks at 5-min sampling
 
 CODE_RE = re.compile(r"\(([0-9A-Fa-f]{4})\)")
 
@@ -101,6 +103,11 @@ if not logger.handlers:
 
 def now_iso():
     return datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
+
+
+def now_utc():
+    """Timezone-aware current UTC time (used for metric timestamps)."""
+    return datetime.now(timezone.utc)
 
 
 def room_for(name):
@@ -267,6 +274,113 @@ def force_off_time():
         return None
 
 
+# --- Metrics time-series (for the trend charts) ------------------------------
+#
+# One compact JSON object per sample, appended to METRICS_FILE:
+#   {"t": "<UTC iso>", "h": {room: humidity}, "ac": {room: mode|"off"}}
+# Timestamps are UTC (matching the control.log) and converted to SCHEDULE_TZ for
+# day-bucketing in the web. Trimmed to a bounded size so it can't fill the disk.
+
+def append_metric(sample):
+    try:
+        line = json.dumps(sample, separators=(",", ":"))
+        with open(METRICS_FILE, "a") as f:
+            f.write(line + "\n")
+        if METRICS_FILE.exists() and METRICS_FILE.stat().st_size > METRICS_MAX_BYTES:
+            _trim_metrics()
+    except OSError as exc:
+        logger.warning("metrics append failed: %s", exc)
+
+
+def read_metrics(days=7):
+    """Return the samples (raw dicts) from the last `days` days, oldest first."""
+    cutoff = now_utc() - timedelta(days=days)
+    out = []
+    try:
+        with open(METRICS_FILE) as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    s = json.loads(line)
+                    t = datetime.fromisoformat(s["t"])
+                except (ValueError, KeyError, TypeError):
+                    continue
+                if t.tzinfo is None:
+                    t = t.replace(tzinfo=timezone.utc)
+                if t >= cutoff:
+                    out.append(s)
+    except FileNotFoundError:
+        return []
+    return out
+
+
+def _trim_metrics(days=8):
+    rows = read_metrics(days)
+    with tempfile.NamedTemporaryFile("w", dir=METRICS_FILE.parent, delete=False) as tmp:
+        for s in rows:
+            tmp.write(json.dumps(s, separators=(",", ":")) + "\n")
+        tmp_name = tmp.name
+    os.replace(tmp_name, METRICS_FILE)
+
+
+_BACKFILL_RE = re.compile(
+    r"^(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d)\s+(.+?): (\d+)% (.*)$")
+
+
+def backfill_metrics_from_logs():
+    """Seed METRICS_FILE from existing control.log files (best-effort, one-time).
+
+    The decision log carries per-room humidity and AC mode during active hours
+    (UTC). We group lines by timestamp into samples so the charts have immediate
+    history. Overnight off-windows have no humidity lines (ACs are off then), so
+    those gaps are expected. Does nothing if metrics already exist.
+    """
+    if METRICS_FILE.exists() and METRICS_FILE.stat().st_size > 0:
+        return 0
+    logs = sorted(DATA_DIR.glob("control.log*"))  # current + rotated
+    by_ts = {}
+    for path in logs:
+        try:
+            text = path.read_text(errors="replace")
+        except OSError:
+            continue
+        for line in text.splitlines():
+            m = _BACKFILL_RE.match(line)
+            if not m:
+                continue
+            ts, room, hum, rest = m.group(1), m.group(2), int(m.group(3)), m.group(4).lower()
+            if "(" in room:  # skip non-room labels like "all ACs (driven by ...)"
+                continue
+            samp = by_ts.setdefault(ts, {"h": {}, "ac": {}})
+            samp["h"][room] = hum
+            if "manual cool" in rest:
+                mode = "cool"
+            elif "manual heat" in rest:
+                mode = "heat"
+            elif "'dry'" in rest:
+                mode = "dry"
+            elif "'off'" in rest:
+                mode = "off"
+            else:
+                mode = None
+            if mode:
+                samp["ac"][room] = mode
+    if not by_ts:
+        return 0
+    written = 0
+    with open(METRICS_FILE, "w") as f:
+        for ts in sorted(by_ts):
+            # log timestamps are container-local = UTC here; tag them UTC.
+            t_iso = ts.replace(" ", "T") + "+00:00"
+            rec = {"t": t_iso, "h": by_ts[ts]["h"], "ac": by_ts[ts]["ac"]}
+            f.write(json.dumps(rec, separators=(",", ":")) + "\n")
+            written += 1
+    logger.info("Backfilled %d metric samples from logs", written)
+    return written
+
+
 # --- Gree AC helpers ---------------------------------------------------------
 
 async def discover_acs(wait=6):
@@ -317,7 +431,8 @@ __all__ = [
     "ROOM_BY_CODE", "AC_BY_ROOM", "ON_THRESHOLD", "OFF_THRESHOLD",
     "DATA_DIR", "STATE_FILE", "STATUS_FILE", "OVERRIDE_FILE", "SETTINGS_FILE",
     "LOG_FILE", "SCHEDULE_TZ", "OFF_WEEKDAY", "OFF_WEEKEND", "FORCE_OFF_AT",
-    "TEMP_RANGES", "clamp_temperature", "in_off_window", "now_local",
+    "TEMP_RANGES", "clamp_temperature", "in_off_window", "now_local", "now_utc",
+    "METRICS_FILE", "append_metric", "read_metrics", "backfill_metrics_from_logs",
     "logger", "now_iso", "room_for", "decide",
     "load_state", "save_state", "read_status", "write_status",
     "read_override", "write_override", "read_settings", "write_settings",

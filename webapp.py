@@ -20,9 +20,12 @@ import os
 import time
 from datetime import datetime, timedelta
 
+from datetime import timezone
+
 from flask import (Flask, Response, jsonify, redirect, render_template_string,
                    request, url_for)
 
+import charts
 import core
 
 app = Flask(__name__)
@@ -195,6 +198,33 @@ def collect():
     }
 
 
+def trends(days):
+    """Build the Trends-section context (charts + legend + today summary)."""
+    days = max(1, min(7, days or 7))
+    samples = core.read_metrics(days)
+    rooms = sorted(core.AC_BY_ROOM)
+    tz = core.now_local().tzinfo or timezone.utc
+    now = core.now_utc()
+    cmap = charts.color_map(rooms)
+    status = core.read_status()
+    th = status.get("thresholds", {"on": core.ON_THRESHOLD, "off": core.OFF_THRESHOLD})
+    sensors = status.get("sensors", {})
+    today_rt = charts.runtime_today(samples, rooms, tz, now)
+    summary = [{
+        "room": r, "color": cmap[r],
+        "runtime": f"{today_rt.get(r, 0.0) / 60:.1f}h",
+        "humidity": sensors.get(r, {}).get("humidity"),
+    } for r in rooms]
+    return {
+        "days": days,
+        "have_data": bool(samples),
+        "legend": [{"room": r, "color": cmap[r]} for r in rooms],
+        "humidity_svg": charts.humidity_svg(samples, rooms, tz, days, th["on"], th["off"], now),
+        "runtime_svg": charts.runtime_svg(samples, rooms, tz, days, now),
+        "summary": summary,
+    }
+
+
 # Self-contained inline SVG wordmarks (no external assets; render offline).
 GREE_LOGO = (
     '<svg class="logo" viewBox="0 0 86 24" height="18" role="img" aria-label="GREE">'
@@ -316,6 +346,21 @@ PAGE = """<!doctype html>
     .chip.off { color:var(--muted); opacity:.6; }
     .chip.amber { color:var(--amber); border-color:var(--amber); background:var(--amber-bg); }
     .ctlnote { font-size:.72rem; color:var(--green); font-weight:600; margin-top:.15rem; }
+    .chart { width:100%; height:auto; display:block; }
+    .trendbar { display:flex; justify-content:space-between; align-items:center;
+      flex-wrap:wrap; gap:.5rem; margin-bottom:.5rem; }
+    .legend { display:flex; gap:.85rem; flex-wrap:wrap; }
+    .lg { display:inline-flex; align-items:center; gap:.32rem; font-size:.78rem;
+      color:var(--muted); font-weight:600; }
+    .lg i { width:11px; height:11px; border-radius:3px; display:inline-block; }
+    .ranges { display:flex; gap:.3rem; }
+    .range { font-size:.76rem; padding:.16rem .55rem; border-radius:8px; font-weight:600;
+      border:1px solid var(--border); color:var(--muted); text-decoration:none; }
+    .range.on { background:var(--accent); color:#fff; border-color:var(--accent); }
+    .trend { margin:.5rem 0 .9rem; }
+    .trend-title { font-size:.76rem; color:var(--muted); font-weight:600; margin-bottom:.25rem; }
+    .summary { display:flex; gap:.6rem; flex-wrap:wrap; margin-top:.2rem; }
+    .sumcard { border:1px solid var(--border); border-radius:10px; padding:.4rem .65rem; }
     .help { font-size:.88rem; color:var(--muted); }
     .help p { margin:.55rem 0; line-height:1.55; }
     .help ul { margin:.4rem 0 .55rem 1.1rem; line-height:1.55; }
@@ -466,6 +511,34 @@ PAGE = """<!doctype html>
     {% else %}
       <div class="card sub">No ACs in last snapshot.</div>
     {% endfor %}
+  </div>
+
+  <h2>Trends</h2>
+  <div class="card">
+    <div class="trendbar">
+      <div class="legend">{% for l in trends.legend %}<span class="lg"><i style="background:{{ l.color }}"></i>{{ l.room }}</span>{% endfor %}</div>
+      <div class="ranges">{% for d in [1, 3, 7] %}<a class="range{% if trends.days == d %} on{% endif %}" href="?days={{ d }}">{{ d }}d</a>{% endfor %}</div>
+    </div>
+    {% if trends.have_data %}
+    <div class="trend">
+      <div class="trend-title">Humidity (%RH) over {{ trends.days }} day(s) — dashed = ON/OFF thresholds</div>
+      {{ trends.humidity_svg|safe }}
+    </div>
+    <div class="trend">
+      <div class="trend-title">AC run-time per day (hours)</div>
+      {{ trends.runtime_svg|safe }}
+    </div>
+    <div class="summary">
+      {% for s in trends.summary %}
+      <div class="sumcard">
+        <span class="lg"><i style="background:{{ s.color }}"></i>{{ s.room }}</span>
+        <div class="sub">now {{ s.humidity if s.humidity is not none else '—' }}%RH &middot; ran {{ s.runtime }} today</div>
+      </div>
+      {% endfor %}
+    </div>
+    {% else %}
+    <p class="sub">Collecting data… charts fill in as samples accumulate (every 5 min). Recent history is seeded from the logs on first run.</p>
+    {% endif %}
   </div>
 
   <h2>Recent log</h2>
@@ -637,6 +710,7 @@ document.addEventListener('DOMContentLoaded', () => { update(); setInterval(upda
 def index():
     return render_template_string(
         PAGE, snap=collect(), force_off_at=core.force_off_at_str(),
+        trends=trends(request.args.get("days", default=7, type=int)),
         temp_options=TEMP_OPTIONS, temp_defaults=TEMP_DEFAULTS,
         laundry_temps=LAUNDRY_TEMPS, laundry_hours=LAUNDRY_HOURS,
         laundry_default_temp=LAUNDRY_DEFAULT_TEMP, laundry_default_hours=LAUNDRY_DEFAULT_HOURS,

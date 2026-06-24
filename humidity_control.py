@@ -32,10 +32,11 @@ from bleak import BleakScanner
 from core import (
     AC_BY_ROOM, OFF_THRESHOLD, OFF_WEEKDAY, OFF_WEEKEND, ON_THRESHOLD,
     ROOM_BY_CODE, SCHEDULE_TZ,
-    apply_action, apply_features, decide, discover_acs, force_off_at_str,
-    force_off_time, in_off_window, laundry_status, load_state, logger, now_iso,
-    now_local, query_ac_states, read_laundry, read_status, room_for,
-    save_state, write_laundry, write_status,
+    append_metric, apply_action, apply_features, backfill_metrics_from_logs,
+    decide, discover_acs, force_off_at_str, force_off_time, in_off_window,
+    laundry_status, load_state, logger, now_iso, now_local, now_utc,
+    query_ac_states, read_laundry, read_status, room_for, save_state,
+    write_laundry, write_status,
 )
 from humidity_sensors import DEFAULT_PREFIX, flush_bluez_cache, make_collector
 
@@ -356,6 +357,8 @@ def parse_args():
                         "(default: 10; 0 = never)")
     p.add_argument("--ac-wait", type=int, default=6, metavar="SECONDS",
                    help="seconds to wait for AC discovery (default: 6)")
+    p.add_argument("--metrics-interval", type=float, default=300.0, metavar="SECONDS",
+                   help="seconds between trend-chart metric samples (default: 300)")
     p.add_argument("--prefix", default=DEFAULT_PREFIX,
                    help=f"sensor name prefix (default: {DEFAULT_PREFIX!r})")
     p.add_argument("--dry-run", action="store_true",
@@ -365,6 +368,22 @@ def parse_args():
 
 def _status_mode(off_now):
     return "scheduled-off" if off_now else "auto"
+
+
+def _record_metric(last_sensors, ac_states):
+    """Append one trend-chart sample: humidity per room + each AC's mode/off."""
+    hum = {room: v["humidity"] for room, v in last_sensors.items()
+           if v.get("humidity") is not None}
+    acm = {}
+    for room, mac in AC_BY_ROOM.items():
+        st = ac_states.get(mac) or {}
+        if st.get("error"):
+            acm[room] = "err"
+        elif not st.get("power"):
+            acm[room] = "off"
+        else:
+            acm[room] = str(st.get("mode", "")).lower()
+    append_metric({"t": now_utc().isoformat(timespec="seconds"), "h": hum, "ac": acm})
 
 
 async def main_async():
@@ -386,10 +405,15 @@ async def main_async():
 
     state = load_state()
     last_sensors = dict(read_status().get("sensors", {}))  # survive restarts
+    try:  # one-time seed of the trend charts from existing logs
+        backfill_metrics_from_logs()
+    except Exception as exc:
+        logger.warning("metrics backfill failed: %s", exc)
     ac_states = {}
     decisions = []
     next_decision = 0.0  # decide immediately on first tick
     next_flush = 0.0 if args.flush_interval else None  # flush once at startup too
+    next_metric = 0.0  # sample immediately on first tick
     was_off_window = False  # to detect the moment we enter an OFF window
     last_decision_wall = None  # wall clock at the previous decision (force-off edge)
 
@@ -421,6 +445,10 @@ async def main_async():
                 except Exception as exc:  # keep the loop alive across transient errors
                     logger.exception("Decision error: %s", exc)
                 next_decision = time.monotonic() + args.poll
+
+            if time.monotonic() >= next_metric:
+                _record_metric(last_sensors, ac_states)
+                next_metric = time.monotonic() + args.metrics_interval
 
             off_now, window_label = in_off_window()
             write_status({
