@@ -56,8 +56,12 @@ _optimistic = {}
 def _expected_state(act, temp):
     if act == "off":
         return {"power": False}
-    return {"power": True, "mode": act.capitalize(),
-            "target_temp": core.clamp_temperature(act, temp)}
+    state = {"power": True, "mode": act.capitalize(),
+             "target_temp": core.clamp_temperature(act, temp)}
+    if act in ("cool", "dry"):  # xFan + Health are forced on for these
+        state["xfan"] = True
+        state["anion"] = True
+    return state
 
 TEMP_OPTIONS = {mode: list(range(lo, hi + 1)) for mode, (lo, hi) in core.TEMP_RANGES.items()}
 TEMP_DEFAULTS = {mode: core.clamp_temperature(mode, None) for mode in core.TEMP_RANGES}
@@ -160,6 +164,7 @@ def collect():
         acs.append({
             "mac": mac, "room": ROOM_BY_AC.get(mac, "—"), "ip": a.get("ip"),
             "mode": a.get("mode"), "target_temp": a.get("target_temp"),
+            "xfan": bool(a.get("xfan")), "health": bool(a.get("anion")),
             "power_cls": cls, "power_text": txt,
         })
 
@@ -306,6 +311,11 @@ PAGE = """<!doctype html>
     .ctl.mode button { min-width:64px; text-align:center; }
     .ctl .feat { font-size:.72rem; color:var(--green); font-weight:700;
       white-space:nowrap; cursor:help; }
+    .feats { display:flex; gap:.35rem; margin:.3rem 0 .1rem; }
+    .chip { font-size:.68rem; font-weight:700; padding:.08rem .45rem; border-radius:999px;
+      border:1px solid var(--border); letter-spacing:.02em; }
+    .chip.on { color:var(--green); border-color:var(--green); background:var(--green-bg); }
+    .chip.off { color:var(--muted); opacity:.55; }
     .help { font-size:.88rem; color:var(--muted); }
     .help p { margin:.55rem 0; line-height:1.55; }
     .help ul { margin:.4rem 0 .55rem 1.1rem; line-height:1.55; }
@@ -449,6 +459,7 @@ PAGE = """<!doctype html>
           <span class="pill {{ a.power_cls }}{% if a.power_cls == 'green' %} dot{% endif %}" id="pill-{{ a.mac }}">{{ a.power_text }}</span>
         </div>
         <div class="state" id="state-{{ a.mac }}">Mode <b>{{ a.mode or '—' }}</b>{% if a.target_temp %} &middot; target <b>{{ a.target_temp }}&deg;C</b>{% endif %}</div>
+        <div class="feats" id="feats-{{ a.mac }}"><span class="chip {{ 'on' if a.xfan else 'off' }}">xFan</span><span class="chip {{ 'on' if a.health else 'off' }}">Health</span></div>
         <div class="controls">{{ controls(a.mac) }}</div>
       </div>
     {% else %}
@@ -545,6 +556,9 @@ async function update() {
     const st = document.getElementById('state-' + a.mac);
     if (st) st.innerHTML = 'Mode <b>' + esc(a.mode || '—') + '</b>'
         + (a.target_temp ? ' &middot; target <b>' + esc(a.target_temp) + '&deg;C</b>' : '');
+    const ft = document.getElementById('feats-' + a.mac);
+    if (ft) ft.innerHTML = '<span class="chip ' + (a.xfan ? 'on' : 'off') + '">xFan</span>'
+        + '<span class="chip ' + (a.health ? 'on' : 'off') + '">Health</span>';
   });
 
   const L = d.laundry || { active: false };
