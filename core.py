@@ -25,7 +25,7 @@ from greeclimate.device import Device, Mode
 from greeclimate.discovery import Discovery
 
 from test import (  # local module (CLI helpers, no bleak)
-    TEMP_RANGES, apply_action, clamp_temperature, safe_close,
+    TEMP_RANGES, apply_action, apply_features, clamp_temperature, safe_close,
 )
 
 # --- Configuration -----------------------------------------------------------
@@ -298,6 +298,8 @@ async def query_ac_states(acs):
                 "mode": mode,
                 "target_temp": device.target_temperature,
                 "current_temp": getattr(device, "current_temperature", None),
+                "xfan": bool(device.xfan),
+                "anion": bool(device.anion),
             }
         except Exception as exc:
             return mac, {"ip": str(info.ip), "error": str(exc)}
@@ -319,5 +321,5 @@ __all__ = [
     "read_override", "write_override", "read_settings", "write_settings",
     "read_laundry", "write_laundry", "laundry_status",
     "force_off_at_str", "force_off_time",
-    "discover_acs", "query_ac_states", "apply_action", "safe_close",
+    "discover_acs", "query_ac_states", "apply_action", "apply_features", "safe_close",
 ]

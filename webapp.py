@@ -304,9 +304,13 @@ PAGE = """<!doctype html>
     .ctl { display:flex; align-items:center; gap:.5rem; margin:0; }
     .ctl.mode { flex-wrap:wrap; }
     .ctl.mode button { min-width:64px; text-align:center; }
-    .ctl .opt { display:flex; align-items:center; gap:.2rem; font-size:.76rem;
-      color:var(--muted); font-weight:600; cursor:pointer; }
-    .ctl .opt input { margin:0; cursor:pointer; }
+    .ctl .feat { font-size:.72rem; color:var(--green); font-weight:700;
+      white-space:nowrap; cursor:help; }
+    .help { font-size:.88rem; color:var(--muted); }
+    .help p { margin:.55rem 0; line-height:1.55; }
+    .help ul { margin:.4rem 0 .55rem 1.1rem; line-height:1.55; }
+    .help b { color:var(--text); }
+    .help .hl { color:var(--accent); font-weight:700; }
     .ctl.off button { width:100%; }
     .ctl .at { margin-left:auto; color:var(--muted); font-size:.8rem; }
     select { padding:.32rem .4rem; border-radius:8px; border:1px solid var(--border);
@@ -354,8 +358,7 @@ PAGE = """<!doctype html>
     <span class="at">at</span>
     <select name="temp">{% for t in temp_options[mode] %}<option value="{{ t }}"{% if t == temp_defaults[mode] %} selected{% endif %}>{{ t }}&deg;C</option>{% endfor %}</select>
     {% if mode in ['dry', 'cool'] %}
-    <label class="opt"><input type="checkbox" name="xfan" checked>xFan</label>
-    <label class="opt"><input type="checkbox" name="health" checked>Health</label>
+    <span class="feat" title="xFan dries the coil after stopping; Health runs the ionizer. Always on in Cool/Dry.">&#10003; xFan + Health</span>
     {% endif %}
   </form>
   {% endfor %}
@@ -456,6 +459,50 @@ PAGE = """<!doctype html>
   <h2>Recent log</h2>
   <pre id="log">{% for line in snap.log %}{{ line }}
 {% endfor %}</pre>
+
+  <h2>How this works</h2>
+  <div class="card help">
+    <p><b>What it does.</b> This system reads the humidity in each room from the
+    TempPro sensors and automatically runs the matching Gree AC in <b>Dry</b> mode
+    to keep things comfortable. It runs on its own &mdash; you don't have to do
+    anything.</p>
+
+    <p><b>Status bar (top).</b> A green <span class="hl">AUTO</span> badge means the
+    automation is in control. An amber <span class="hl">SCHEDULED OFF</span> means
+    you're inside an off-window (ACs kept off). The line underneath shows the
+    on/off schedule and the daily safety shut-off time.</p>
+
+    <p><b>Sensors.</b> One card per room: current humidity (%RH), temperature,
+    battery and signal. The colour reflects how humid the room is.</p>
+
+    <p><b>The automation rules.</b></p>
+    <ul>
+      <li>Humidity rises above the ON threshold &rarr; the AC switches to <b>Dry</b>.
+      It keeps drying until humidity falls to the OFF threshold, then turns off.</li>
+      <li>It is <b>always on</b> &mdash; there is no pause button.</li>
+      <li>If you set an AC to <b>Cool</b> or <b>Heat</b> (here or in the Gree app),
+      the automation <b>leaves it alone</b> &mdash; that room is yours to control.</li>
+      <li>Set it back to <b>Dry</b> or <b>Off</b> and the automation
+      <b>takes over again</b> automatically.</li>
+    </ul>
+
+    <p><b>Air-conditioner controls.</b> Each AC card (and "All ACs") has buttons:
+    <b>Turn off</b>, <b>Dry</b>, <b>Cool</b>, <b>Heat</b>, each with a target
+    temperature. In <b>Cool</b> and <b>Dry</b>, <span class="hl">xFan</span> (dries
+    the indoor coil to prevent mould) and <span class="hl">Health</span> (ionizer)
+    are <b>always enabled automatically</b> &mdash; nothing to switch on.</p>
+
+    <p><b>Daily safety shut-off.</b> Once a day at the configured time (a backstop
+    for a unit left running), <b>every</b> AC is forced off &mdash; even one you set
+    to Cool/Heat. Change the time in the box near the top; clear it to disable.</p>
+
+    <p><b>Laundry mode.</b> Starts a fixed Dry session in the Bedroom for a set
+    number of hours (to dry clothes), overriding the schedule until it ends or you
+    stop it.</p>
+
+    <p><b>Recent log.</b> A live trace of every decision the controller makes, newest
+    at the bottom &mdash; handy to see why an AC is on or off right now.</p>
+  </div>
 
   <footer>Sensors by {{ temppro_logo|safe }} &middot; ACs by {{ gree_logo|safe }} &middot; updates live in the background</footer>
 </div>
@@ -603,11 +650,10 @@ def action():
         return _respond(False, "Unknown action")
 
     temp = request.form.get("temp", type=int)
-    # xFan (coil blow-dry) + Health (anion) are offered, default-on, only for
-    # Cool/Dry. Only touch them for those actions so Heat/Off don't clear them.
+    # xFan (coil blow-dry) + Health (anion) are always on in Cool/Dry (policy,
+    # not user-toggleable). Left untouched for Heat/Off.
     if act in ("cool", "dry"):
-        xfan = request.form.get("xfan") is not None
-        health = request.form.get("health") is not None
+        xfan = health = True
     else:
         xfan = health = None
 

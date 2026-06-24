@@ -254,6 +254,27 @@ async def apply_action(device_info, action: str, temperature=None, *,
         safe_close(device)
 
 
+async def apply_features(device_info, *, xfan=True, health=True) -> str:
+    """Set only xFan and/or Health on a unit, leaving mode/temp/power as they are.
+
+    Used to enforce the "always on in Cool/Dry" policy without disturbing a
+    manually-chosen temperature. None leaves that feature untouched.
+    """
+    device = Device(device_info, timeout=10, bind_timeout=10)
+    try:
+        await device.bind()
+        await device.update_state()
+        await asyncio.wait_for(device._valid_state.wait(), timeout=10)
+        if xfan is not None:
+            device.xfan = bool(xfan)
+        if health is not None:
+            device.anion = bool(health)
+        await device.push_state_update()
+        return "features updated"
+    finally:
+        safe_close(device)
+
+
 def main() -> int:
     args = parse_args()
     log_level = logging.DEBUG if args.verbose else logging.WARNING

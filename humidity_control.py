@@ -32,9 +32,9 @@ from bleak import BleakScanner
 from core import (
     AC_BY_ROOM, OFF_THRESHOLD, OFF_WEEKDAY, OFF_WEEKEND, ON_THRESHOLD,
     ROOM_BY_CODE, SCHEDULE_TZ,
-    apply_action, decide, discover_acs, force_off_at_str, force_off_time,
-    in_off_window, laundry_status, load_state, logger, now_iso, now_local,
-    query_ac_states, read_laundry, read_status, room_for,
+    apply_action, apply_features, decide, discover_acs, force_off_at_str,
+    force_off_time, in_off_window, laundry_status, load_state, logger, now_iso,
+    now_local, query_ac_states, read_laundry, read_status, room_for,
     save_state, write_laundry, write_status,
 )
 from humidity_sensors import DEFAULT_PREFIX, flush_bluez_cache, make_collector
@@ -224,6 +224,36 @@ async def handle_laundry(args, acs, ac_states):
         return mac, f"laundry ({room}) => FAILED: {exc}"
 
 
+async def enforce_features(acs, ac_states, dry_run):
+    """Ensure every unit running in Cool or Dry has xFan + Health on.
+
+    These are policy: always active in Cool/Dry. Only units actually missing one
+    are pushed, and only xFan/Health are changed — mode, temperature and power are
+    left as-is, so a manually-set Cool keeps its own temperature. No-op (no device
+    I/O) for units already compliant.
+    """
+    lines = []
+    for mac, info in acs.items():
+        ac = ac_states.get(mac) or {}
+        if ac.get("error") or not ac.get("power"):
+            continue
+        if str(ac.get("mode", "")).lower() not in ("cool", "dry"):
+            continue
+        if ac.get("xfan") and ac.get("anion"):
+            continue  # already compliant
+        room = next((r for r, m in AC_BY_ROOM.items() if m == mac), mac)
+        mode = str(ac.get("mode", "")).lower()
+        if dry_run:
+            lines.append(f"{room} ({mode}) — WOULD enable xFan+Health")
+            continue
+        try:
+            await apply_features(info, xfan=True, health=True)
+            lines.append(f"{room} ({mode}) — enabled xFan+Health")
+        except Exception as exc:
+            lines.append(f"{room} ({mode}) — xFan+Health FAILED: {exc}")
+    return lines
+
+
 async def decide_and_act(args, acs, state, rooms, ac_states, enforce_off=True,
                          force_off=False):
     """Run the control logic once and return the list of decision log lines.
@@ -253,6 +283,9 @@ async def decide_and_act(args, acs, state, rooms, ac_states, enforce_off=True,
     if laundry_mac is not None:
         acs = {m: d for m, d in acs.items() if m != laundry_mac}
         rooms = {r: h for r, h in rooms.items() if AC_BY_ROOM.get(r) != laundry_mac}
+
+    # Policy: any unit in Cool/Dry must have xFan + Health on (incl. manual Cool).
+    decisions += await enforce_features(acs, ac_states, args.dry_run)
 
     off_now, _ = in_off_window()
 
