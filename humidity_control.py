@@ -141,8 +141,11 @@ async def apply_target(key, label, desired, devices, state, dry_run, ac_states):
     if dry_run:
         state[key] = desired
         return f"{label} => WOULD set '{desired}' (dry-run)"
+    # Match the web UI: whenever automation starts Dry, also turn on xFan (coil
+    # blow-dry) and Health (anion). 'off' leaves them untouched.
+    extras = {"xfan": True, "health": True} if desired == "dry" else {}
     results = await asyncio.gather(
-        *(apply_action(d, desired) for d in devices), return_exceptions=True
+        *(apply_action(d, desired, **extras) for d in devices), return_exceptions=True
     )
     errors = [str(r) for r in results if isinstance(r, Exception)]
     if errors:
@@ -215,7 +218,7 @@ async def handle_laundry(args, acs, ac_states):
     if args.dry_run:
         return mac, f"laundry ({room}) => WOULD set Dry {temp}°C ({remaining}min left)"
     try:
-        msg = await apply_action(device, "laundry", temp)
+        msg = await apply_action(device, "laundry", temp, xfan=True, health=True)
         return mac, f"laundry ({room}) => {msg} ({remaining}min left)"
     except Exception as exc:
         return mac, f"laundry ({room}) => FAILED: {exc}"
