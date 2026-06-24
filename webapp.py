@@ -376,6 +376,10 @@ PAGE = """<!doctype html>
     .help ul { margin:.4rem 0 .55rem 1.1rem; line-height:1.55; }
     .help b { color:var(--text); }
     .help .hl { color:var(--accent); font-weight:700; }
+    .help a { color:var(--accent); text-decoration:none; font-weight:600; }
+    .help a:hover { text-decoration:underline; }
+    .help code { font-size:.82em; background:var(--bg); border:1px solid var(--border);
+      border-radius:5px; padding:.02rem .28rem; }
     .ctl.off button { width:100%; }
     .ctl .at { margin-left:auto; color:var(--muted); font-size:.8rem; }
     select { padding:.32rem .4rem; border-radius:8px; border:1px solid var(--border);
@@ -599,6 +603,24 @@ PAGE = """<!doctype html>
     <p><b>Laundry mode.</b> Starts a fixed Dry session in the Bedroom for a set
     number of hours (to dry clothes), overriding the schedule until it ends or you
     stop it.</p>
+
+    <p><b>Trends.</b> Charts built from a metric sampled every 5 minutes (humidity
+    per room + each AC's mode), kept for 7 days. Pick a 1/3/7-day window. You get:
+    humidity over time (with dashed ON/OFF threshold guides), AC run-time per day,
+    and an estimated energy chart. They redraw on page load (reload to refresh).</p>
+
+    <p><b>Estimated energy.</b> The ACs don't report real power use, so this is a
+    <b>model, not a measurement</b>: per-mode run-time &times; an assumed wattage.
+    Defaults come from the <b>Gree Pular 9000 (GWH09)</b> rated input &mdash; cool
+    ~780&nbsp;W, heat ~750&nbsp;W &mdash; with <b>Dry estimated ~300&nbsp;W</b>
+    (Gree publishes no Dry figure, and Dry is what the automation uses most, so
+    it's the least certain). Inverters also modulate power continuously, so read it
+    as a relative trend, not a bill. To make it accurate, plug one unit into an
+    energy meter for a day and set <code>WATT_COOL</code> / <code>WATT_DRY</code> /
+    <code>WATT_HEAT</code>. Sources:
+    <a href="https://www.masterhaus.bg/en/product/223623-inverter-air-conditioner-gwh09-agb-k6-dna1-b-0-6-3-4k-w-cooling-0-6-3-7k-w-heating-wi-fi-a-a" target="_blank" rel="noopener">spec ranges</a>,
+    <a href="https://lazanias.com/product/klimatistiko-gree-pular-09-gwh09aga-k6dna1a-r32-inverter-wifi1626782878" target="_blank" rel="noopener">EER/COP &amp; SEER</a>,
+    <a href="https://greecyprus.com/wp-content/uploads/2021/09/PULAR-TECH-SPECS-REV.pdf" target="_blank" rel="noopener">Pular tech-specs PDF</a>.</p>
 
     <p><b>Recent log.</b> A live trace of every decision the controller makes, newest
     at the bottom &mdash; handy to see why an AC is on or off right now.</p>
