@@ -34,7 +34,7 @@ from core import (
     ROOM_BY_CODE, SCHEDULE_TZ,
     apply_action, decide, discover_acs, force_off_at_str, force_off_time,
     in_off_window, laundry_status, load_state, logger, now_iso, now_local,
-    query_ac_states, read_laundry, read_override, read_status, room_for,
+    query_ac_states, read_laundry, read_status, room_for,
     save_state, write_laundry, write_status,
 )
 from humidity_sensors import DEFAULT_PREFIX, flush_bluez_cache, make_collector
@@ -225,8 +225,11 @@ async def decide_and_act(args, acs, state, rooms, ac_states, enforce_off=True,
                          force_off=False):
     """Run the control logic once and return the list of decision log lines.
 
-    Precedence: laundry > daily force-off > manual override > OFF schedule >
-    humidity logic. Actuation is reconciled against the live AC states.
+    Precedence: laundry > daily force-off > OFF schedule > humidity logic.
+    Actuation is reconciled against the live AC states. Automation is always on;
+    a unit a human put in Cool/Heat is left alone per-room (see _is_manual_hold),
+    and reclaimed automatically once it's back in Dry/Off — there is no global
+    pause.
 
     `enforce_off` is True only on the cycle the OFF window is first entered: the
     schedule forces every unit off then. On later cycles it's False, so a unit a
@@ -234,8 +237,8 @@ async def decide_and_act(args, acs, state, rooms, ac_states, enforce_off=True,
     fought every poll — manual control wins inside the window once it's started.
 
     `force_off` is True for the single cycle the daily force-off time is crossed:
-    every AC is turned off unconditionally, overriding manual Cool/Heat and any
-    pause — the backstop for units left on (laundry mode excepted).
+    every AC is turned off unconditionally, overriding manual Cool/Heat — the
+    backstop for units left on (laundry mode excepted).
     """
     decisions = []
 
@@ -248,7 +251,6 @@ async def decide_and_act(args, acs, state, rooms, ac_states, enforce_off=True,
         acs = {m: d for m, d in acs.items() if m != laundry_mac}
         rooms = {r: h for r, h in rooms.items() if AC_BY_ROOM.get(r) != laundry_mac}
 
-    override = read_override()
     off_now, _ = in_off_window()
 
     if force_off:
@@ -257,8 +259,6 @@ async def decide_and_act(args, acs, state, rooms, ac_states, enforce_off=True,
             decisions.append(await apply_target(
                 key, f"{label} [daily force-off {hhmm}]", "off", devices, state,
                 args.dry_run, ac_states))
-    elif override.get("mode") == "manual":
-        decisions.append(f"manual override ({override.get('action')}) — automation paused")
     elif off_now:
         _, window_label = in_off_window()
         for key, label, devices in controlled_units(acs):
@@ -328,8 +328,6 @@ def parse_args():
 
 
 def _status_mode(off_now):
-    if read_override().get("mode") == "manual":
-        return "manual"
     return "scheduled-off" if off_now else "auto"
 
 
@@ -389,11 +387,9 @@ async def main_async():
                 next_decision = time.monotonic() + args.poll
 
             off_now, window_label = in_off_window()
-            override = read_override()
             write_status({
                 "updated_at": now_iso(),
                 "mode": _status_mode(off_now),
-                "override_action": override.get("action") if override.get("mode") == "manual" else None,
                 "dry_run": args.dry_run,
                 "control_mode": mode,
                 "thresholds": {"on": ON_THRESHOLD, "off": OFF_THRESHOLD},

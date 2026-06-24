@@ -119,9 +119,7 @@ def _power_pill(a):
     return "off", "off"
 
 
-def _status_pill(status, override):
-    if override.get("mode") == "manual":
-        return "red", "MANUAL · automation paused"
+def _status_pill(status):
     if status.get("mode") == "scheduled-off":
         win = status.get("schedule", {}).get("window", "")
         return "amber", f"SCHEDULED OFF · {win}".strip(" ·")
@@ -131,7 +129,6 @@ def _status_pill(status, override):
 def collect():
     """Build the snapshot shared by the page render and the JSON API."""
     status = core.read_status()
-    override = core.read_override()
     thresholds = status.get("thresholds", {"on": core.ON_THRESHOLD, "off": core.OFF_THRESHOLD})
 
     sensors = []
@@ -184,10 +181,10 @@ def collect():
     if schedule:
         schedule += f" · daily force-off {force_off_at or 'off'}"
 
-    pill_cls, pill_text = _status_pill(status, override)
+    pill_cls, pill_text = _status_pill(status)
     return {
         "pill_cls": pill_cls, "pill_text": pill_text, "meta": meta, "schedule": schedule,
-        "manual": override.get("mode") == "manual", "force_off_at": force_off_at,
+        "force_off_at": force_off_at,
         "laundry": core.laundry_status(),
         "sensors": sensors, "acs": acs, "log": tail_log(),
     }
@@ -305,7 +302,11 @@ PAGE = """<!doctype html>
 
     .controls { display:flex; flex-direction:column; gap:.45rem; }
     .ctl { display:flex; align-items:center; gap:.5rem; margin:0; }
+    .ctl.mode { flex-wrap:wrap; }
     .ctl.mode button { min-width:64px; text-align:center; }
+    .ctl .opt { display:flex; align-items:center; gap:.2rem; font-size:.76rem;
+      color:var(--muted); font-weight:600; cursor:pointer; }
+    .ctl .opt input { margin:0; cursor:pointer; }
     .ctl.off button { width:100%; }
     .ctl .at { margin-left:auto; color:var(--muted); font-size:.8rem; }
     select { padding:.32rem .4rem; border-radius:8px; border:1px solid var(--border);
@@ -352,6 +353,10 @@ PAGE = """<!doctype html>
     <button class="b-{{ mode }}">{{ mode|capitalize }}</button>
     <span class="at">at</span>
     <select name="temp">{% for t in temp_options[mode] %}<option value="{{ t }}"{% if t == temp_defaults[mode] %} selected{% endif %}>{{ t }}&deg;C</option>{% endfor %}</select>
+    {% if mode in ['dry', 'cool'] %}
+    <label class="opt"><input type="checkbox" name="xfan" checked>xFan</label>
+    <label class="opt"><input type="checkbox" name="health" checked>Health</label>
+    {% endif %}
   </form>
   {% endfor %}
 {% endmacro %}
@@ -368,10 +373,6 @@ PAGE = """<!doctype html>
       <span class="meta" id="sched"{% if not snap.schedule %} hidden{% endif %}>{{ snap.schedule }}</span>
       <span id="live">live</span>
     </div>
-    <form id="resume" method="post" action="{{ url_for('action') }}"{% if not snap.manual %} hidden{% endif %}>
-      <input type="hidden" name="action" value="auto">
-      <button class="primary" type="submit">&#9654; Resume Auto</button>
-    </form>
   </div>
 
   <div class="card" style="margin-bottom:.8rem">
@@ -486,7 +487,6 @@ async function update() {
   document.getElementById('meta').textContent = d.meta;
   const sched = document.getElementById('sched');
   sched.textContent = d.schedule; sched.hidden = !d.schedule;
-  document.getElementById('resume').hidden = !d.manual;
 
   const grid = document.getElementById('sensors');
   grid.innerHTML = d.sensors.length ? d.sensors.map(sensorCard).join('')
@@ -560,7 +560,7 @@ async function postForm(f, btn) {
 }
 document.addEventListener('submit', (e) => {
   const f = e.target;
-  if (!f.matches('form.ctl, #resume, .laundryform')) return;
+  if (!f.matches('form.ctl, .laundryform')) return;
   e.preventDefault();
   postForm(f, e.submitter);
 });
@@ -599,15 +599,18 @@ def action():
     act = request.form.get("action")
     mac = request.form.get("mac", "all")
 
-    if act == "auto":
-        core.write_override("auto")
-        core.logger.info("Web: resume AUTO")
-        return _respond(True, "Resumed automatic mode")
-
     if act not in ("off", "dry", "cool", "heat"):
         return _respond(False, "Unknown action")
 
     temp = request.form.get("temp", type=int)
+    # xFan (coil blow-dry) + Health (anion) are offered, default-on, only for
+    # Cool/Dry. Only touch them for those actions so Heat/Off don't clear them.
+    if act in ("cool", "dry"):
+        xfan = request.form.get("xfan") is not None
+        health = request.form.get("health") is not None
+    else:
+        xfan = health = None
+
     acs = get_acs()
     if mac != "all" and mac not in acs:
         acs = get_acs(force=True)  # cache may be stale — re-discover once
@@ -621,7 +624,8 @@ def action():
 
     async def run():
         return await asyncio.gather(
-            *(core.apply_action(info, act, temp) for info in targets.values()),
+            *(core.apply_action(info, act, temp, xfan=xfan, health=health)
+              for info in targets.values()),
             return_exceptions=True,
         )
 
@@ -635,8 +639,8 @@ def action():
         if not isinstance(result, Exception):
             _optimistic[target_mac] = {**expected, "ts": time.time()}
 
-    if oks:  # at least one AC accepted the command -> pause the schedule
-        core.write_override("manual", action=f"{label} ({mac})")
+    # No global pause: the controller stays on and reconciles per-room — it leaves
+    # Cool/Heat alone and reclaims a unit once it's back in Dry/Off.
     core.logger.info("Web: manual '%s' on %s -> %s", label, mac,
                      "; ".join(str(r) for r in results))
 
@@ -644,7 +648,7 @@ def action():
         return _respond(False, "Could not reach the AC: " + "; ".join(errors))
     if errors:
         return _respond(True, f"{label} sent (some ACs failed)")
-    return _respond(True, f"{label} sent — automation paused")
+    return _respond(True, f"{label} sent")
 
 
 @app.route("/laundry/start", methods=["POST"])

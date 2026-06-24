@@ -212,7 +212,14 @@ async def discover(args: argparse.Namespace) -> int:
     return 1 if failed else 0
 
 
-async def apply_action(device_info, action: str, temperature=None) -> str:
+async def apply_action(device_info, action: str, temperature=None, *,
+                       xfan=None, health=None) -> str:
+    """Apply an action to one AC.
+
+    `xfan` (blow-dry the coil after stopping) and `health` (anion/ionizer) are
+    optional: None leaves the unit's current setting untouched, True/False sets
+    it. xFan only takes effect in Cool/Dry modes; health applies to any mode.
+    """
     device = Device(device_info, timeout=10, bind_timeout=10)
     try:
         await device.bind()
@@ -228,7 +235,16 @@ async def apply_action(device_info, action: str, temperature=None) -> str:
             device.temperature_units = TemperatureUnits.C
             device.mode = MODE_BY_ACTION[action]
             device.target_temperature = temp
+            extras = []
+            if xfan is not None and action in ("cool", "dry", "laundry"):
+                device.xfan = bool(xfan)
+                extras.append("xFan on" if xfan else "xFan off")
+            if health is not None:
+                device.anion = bool(health)
+                extras.append("Health on" if health else "Health off")
             message = f"set to {action} at {temp} C"
+            if extras:
+                message += " (" + ", ".join(extras) + ")"
         else:
             raise ValueError(f"Unsupported action: {action}")
 
