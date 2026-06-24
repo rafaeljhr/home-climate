@@ -309,13 +309,13 @@ PAGE = """<!doctype html>
     .ctl { display:flex; align-items:center; gap:.5rem; margin:0; }
     .ctl.mode { flex-wrap:wrap; }
     .ctl.mode button { min-width:64px; text-align:center; }
-    .ctl .feat { font-size:.72rem; color:var(--green); font-weight:700;
-      white-space:nowrap; cursor:help; }
-    .feats { display:flex; gap:.35rem; margin:.3rem 0 .1rem; }
-    .chip { font-size:.68rem; font-weight:700; padding:.08rem .45rem; border-radius:999px;
+    .status { display:flex; gap:.4rem; flex-wrap:wrap; margin:.55rem 0 .15rem; }
+    .chip { font-size:.7rem; font-weight:700; padding:.12rem .55rem; border-radius:999px;
       border:1px solid var(--border); letter-spacing:.02em; }
-    .chip.on { color:var(--green); border-color:var(--green); background:var(--green-bg); }
-    .chip.off { color:var(--muted); opacity:.55; }
+    .chip.on, .chip.green { color:var(--green); border-color:var(--green); background:var(--green-bg); }
+    .chip.off { color:var(--muted); opacity:.6; }
+    .chip.amber { color:var(--amber); border-color:var(--amber); background:var(--amber-bg); }
+    .ctlnote { font-size:.72rem; color:var(--green); font-weight:600; margin-top:.15rem; }
     .help { font-size:.88rem; color:var(--muted); }
     .help p { margin:.55rem 0; line-height:1.55; }
     .help ul { margin:.4rem 0 .55rem 1.1rem; line-height:1.55; }
@@ -367,11 +367,9 @@ PAGE = """<!doctype html>
     <button class="b-{{ mode }}">{{ mode|capitalize }}</button>
     <span class="at">at</span>
     <select name="temp">{% for t in temp_options[mode] %}<option value="{{ t }}"{% if t == temp_defaults[mode] %} selected{% endif %}>{{ t }}&deg;C</option>{% endfor %}</select>
-    {% if mode in ['dry', 'cool'] %}
-    <span class="feat" title="xFan dries the coil after stopping; Health runs the ionizer. Always on in Cool/Dry.">&#10003; xFan + Health</span>
-    {% endif %}
   </form>
   {% endfor %}
+  <div class="ctlnote" title="xFan dries the coil after stopping; Health runs the ionizer.">&#10003; Cool &amp; Dry always run xFan + Health</div>
 {% endmacro %}
 
   <header>
@@ -456,10 +454,13 @@ PAGE = """<!doctype html>
       <div class="card ac">
         <div class="top">
           <div><span class="room">{{ a.room }}</span> {{ gree_logo|safe }}<br><span class="mac">{{ a.mac }} &middot; {{ a.ip or '—' }}</span></div>
-          <span class="pill {{ a.power_cls }}{% if a.power_cls == 'green' %} dot{% endif %}" id="pill-{{ a.mac }}">{{ a.power_text }}</span>
+        </div>
+        <div class="status" id="status-{{ a.mac }}">
+          <span class="chip {{ a.power_cls }}">{{ a.power_text }}</span>
+          <span class="chip {{ 'on' if a.xfan else 'off' }}">xFan</span>
+          <span class="chip {{ 'on' if a.health else 'off' }}">Health</span>
         </div>
         <div class="state" id="state-{{ a.mac }}">Mode <b>{{ a.mode or '—' }}</b>{% if a.target_temp %} &middot; target <b>{{ a.target_temp }}&deg;C</b>{% endif %}</div>
-        <div class="feats" id="feats-{{ a.mac }}"><span class="chip {{ 'on' if a.xfan else 'off' }}">xFan</span><span class="chip {{ 'on' if a.health else 'off' }}">Health</span></div>
         <div class="controls">{{ controls(a.mac) }}</div>
       </div>
     {% else %}
@@ -551,14 +552,14 @@ async function update() {
                                     : '<div class="card sub">No sensor data yet.</div>';
 
   d.acs.forEach(a => {
-    const pill = document.getElementById('pill-' + a.mac);
-    if (pill) { pill.className = 'pill ' + a.power_cls + (a.power_cls==='green' ? ' dot' : ''); pill.textContent = a.power_text; }
+    const status = document.getElementById('status-' + a.mac);
+    if (status) status.innerHTML =
+        '<span class="chip ' + a.power_cls + '">' + esc(a.power_text) + '</span>'
+      + '<span class="chip ' + (a.xfan ? 'on' : 'off') + '">xFan</span>'
+      + '<span class="chip ' + (a.health ? 'on' : 'off') + '">Health</span>';
     const st = document.getElementById('state-' + a.mac);
     if (st) st.innerHTML = 'Mode <b>' + esc(a.mode || '—') + '</b>'
         + (a.target_temp ? ' &middot; target <b>' + esc(a.target_temp) + '&deg;C</b>' : '');
-    const ft = document.getElementById('feats-' + a.mac);
-    if (ft) ft.innerHTML = '<span class="chip ' + (a.xfan ? 'on' : 'off') + '">xFan</span>'
-        + '<span class="chip ' + (a.health ? 'on' : 'off') + '">Health</span>';
   });
 
   const L = d.laundry || { active: false };
