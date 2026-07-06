@@ -300,6 +300,10 @@ async def decide_and_act(args, acs, state, rooms, ac_states, enforce_off=True,
         _, window_label = in_off_window()
         for key, label, devices in controlled_units(acs):
             states = [ac_states.get(d.mac) for d in devices]
+            if devices and any(ac is None or ac.get("error") for ac in states):
+                decisions.append(
+                    f"{label} [off-window {window_label}] — AC unreadable, holding")
+                continue
             if devices and all(_is_manual_hold(ac) for ac in states):
                 mode = str((states[0] or {}).get("mode", "")).lower()
                 decisions.append(
@@ -319,6 +323,12 @@ async def decide_and_act(args, acs, state, rooms, ac_states, enforce_off=True,
             decisions.append("no fresh sensor readings — ACs unchanged")
         for key, label, humidity, devices in targets:
             states = [ac_states.get(d.mac) for d in devices]
+            # Can't read the unit this cycle -> leave it untouched. Prevents a
+            # transient state-read timeout from stripping the manual-Cool guard
+            # and letting the humidity 'off' rule shut down a cooling unit.
+            if devices and any(ac is None or ac.get("error") for ac in states):
+                decisions.append(f"{label}: {humidity}% — AC unreadable, holding")
+                continue
             if devices and all(_is_manual_hold(ac) for ac in states):
                 mode = str((states[0] or {}).get("mode", "")).lower()
                 decisions.append(f"{label}: {humidity}% — manual {mode}, leaving alone")
