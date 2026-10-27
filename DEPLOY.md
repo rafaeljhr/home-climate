@@ -6,7 +6,8 @@ Two containers, managed by `docker-compose.yml`:
   (Dry above 65 % RH, Off at/below 54 %, hysteresis in between). Writes
   `status.json` + `control.log` to the shared `data` volume.
 - **web** — UI at `http://<pi-ip>:8000` showing the latest sensor/AC state and
-  logs, with buttons to turn the ACs Off / Dry / Cool (and Resume Auto).
+  logs, with buttons to turn the ACs Off / Dry / Cool, and to Pause / Resume
+  the automation.
 
 ## Prerequisites (on the Pi)
 
@@ -77,4 +78,6 @@ Other:
 
 - Poll interval / scan window: the `CMD` in `Dockerfile.controller`.
 - Per-mode temperatures from the web UI: Dry/Cool 20–24 °C, Heat 26–30 °C.
-- Manual buttons pause automation until **Resume Auto** is pressed.
+- **Pause automation** (web UI, top right) stops the automation touching any AC
+  (humidity + OFF schedule) until **Resume automation** is pressed; it survives
+  restarts. Laundry mode and the daily force-off still run while paused.

@@ -227,6 +227,11 @@ def write_override(mode, action=None):
     _write_json(OVERRIDE_FILE, {"mode": mode, "action": action, "ts": now_iso()})
 
 
+def automation_paused():
+    """True while the web UI has paused the automation (until Resume)."""
+    return read_override().get("mode") == "paused"
+
+
 def read_settings():
     return _read_json(SETTINGS_FILE, {})
 
@@ -446,7 +451,8 @@ __all__ = [
     "METRICS_FILE", "append_metric", "read_metrics", "backfill_metrics_from_logs",
     "logger", "now_iso", "room_for", "decide",
     "load_state", "save_state", "read_status", "write_status",
-    "read_override", "write_override", "read_settings", "write_settings",
+    "read_override", "write_override", "automation_paused",
+    "read_settings", "write_settings",
     "read_laundry", "write_laundry", "laundry_status",
     "force_off_at_str", "force_off_time",
     "discover_acs", "query_ac_states", "apply_action", "apply_features", "safe_close",

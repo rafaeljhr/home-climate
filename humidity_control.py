@@ -10,8 +10,8 @@ A single Bluetooth scan runs continuously for the whole life of the process, so
 every sensor — including weak ones — keeps getting picked up. The control loop
 refreshes the status snapshot (data/status.json) frequently from the latest
 readings, and re-evaluates the ACs every --poll seconds. Logs go to
-data/control.log. If the web UI has set a manual override, automation is paused
-until "Resume Auto".
+data/control.log. If the web UI's Pause button was pressed, automation leaves the
+ACs alone until "Resume".
 
 Modes (auto-selected): per-room when core.AC_BY_ROOM is filled in, else aggregate
 (the most humid room drives every AC).
@@ -32,8 +32,8 @@ from bleak import BleakScanner
 from core import (
     AC_BY_ROOM, OFF_THRESHOLD, OFF_WEEKDAY, OFF_WEEKEND, ON_THRESHOLD,
     ROOM_BY_CODE, SCHEDULE_TZ,
-    append_metric, apply_action, apply_features, backfill_metrics_from_logs,
-    decide, discover_acs, force_off_at_str, force_off_time, in_off_window,
+    append_metric, apply_action, apply_features, automation_paused,
+    backfill_metrics_from_logs, decide, discover_acs, force_off_at_str, force_off_time, in_off_window,
     laundry_status, load_state, logger, now_iso, now_local, now_utc,
     query_ac_states, read_laundry, read_status, room_for, save_state,
     write_laundry, write_status,
@@ -259,11 +259,14 @@ async def decide_and_act(args, acs, state, rooms, ac_states, enforce_off=True,
                          force_off=False):
     """Run the control logic once and return the list of decision log lines.
 
-    Precedence: laundry > daily force-off > OFF schedule > humidity logic.
-    Actuation is reconciled against the live AC states. Automation is always on;
-    a unit a human put in Cool/Heat is left alone per-room (see _is_manual_hold),
-    and reclaimed automatically once it's back in Dry/Off — there is no global
-    pause.
+    Precedence: laundry > daily force-off > pause > OFF schedule > humidity
+    logic. Actuation is reconciled against the live AC states. A unit a human put
+    in Cool/Heat is left alone per-room (see _is_manual_hold), and reclaimed
+    automatically once it's back in Dry/Off.
+
+    While the web UI has paused the automation, neither the OFF schedule nor the
+    humidity logic touches any AC (laundry and the daily force-off still run).
+    On Resume, control picks up from each unit's live state.
 
     `enforce_off` is True only on the cycle the OFF window is first entered: the
     schedule forces every unit off then. On later cycles it's False, so a unit a
@@ -296,6 +299,8 @@ async def decide_and_act(args, acs, state, rooms, ac_states, enforce_off=True,
             decisions.append(await apply_target(
                 key, f"{label} [daily force-off {hhmm}]", "off", devices, state,
                 args.dry_run, ac_states))
+    elif automation_paused():
+        decisions.append("automation PAUSED (web) — ACs left as they are")
     elif off_now:
         _, window_label = in_off_window()
         for key, label, devices in controlled_units(acs):
@@ -377,6 +382,8 @@ def parse_args():
 
 
 def _status_mode(off_now):
+    if automation_paused():
+        return "paused"
     return "scheduled-off" if off_now else "auto"
 
 

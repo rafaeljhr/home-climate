@@ -126,7 +126,21 @@ def _power_pill(a):
     return "off", "off"
 
 
-def _status_pill(status):
+def _paused_since(override):
+    """Local HH:MM the automation was paused at, or '' if unknown."""
+    try:
+        when = datetime.fromisoformat(override["ts"])
+    except (KeyError, TypeError, ValueError):
+        return ""
+    return when.astimezone(core.now_local().tzinfo).strftime("%H:%M")
+
+
+def _status_pill(status, override):
+    # Read the pause from the override file (not status.json) so the pill flips
+    # the instant the button is pressed, before the controller's next refresh.
+    if override.get("mode") == "paused":
+        since = _paused_since(override)
+        return "red", "PAUSED · automation off" + (f" since {since}" if since else "")
     if status.get("mode") == "scheduled-off":
         win = status.get("schedule", {}).get("window", "")
         return "amber", f"SCHEDULED OFF · {win}".strip(" ·")
@@ -136,6 +150,7 @@ def _status_pill(status):
 def collect():
     """Build the snapshot shared by the page render and the JSON API."""
     status = core.read_status()
+    override = core.read_override()
     thresholds = status.get("thresholds", {"on": core.ON_THRESHOLD, "off": core.OFF_THRESHOLD})
 
     sensors = []
@@ -189,10 +204,10 @@ def collect():
     if schedule:
         schedule += f" · daily force-off {force_off_at or 'off'}"
 
-    pill_cls, pill_text = _status_pill(status)
+    pill_cls, pill_text = _status_pill(status, override)
     return {
         "pill_cls": pill_cls, "pill_text": pill_text, "meta": meta, "schedule": schedule,
-        "force_off_at": force_off_at,
+        "paused": override.get("mode") == "paused", "force_off_at": force_off_at,
         "laundry": core.laundry_status(),
         "sensors": sensors, "acs": acs, "log": tail_log(),
     }
@@ -443,6 +458,10 @@ PAGE = """<!doctype html>
       <span class="meta" id="sched"{% if not snap.schedule %} hidden{% endif %}>{{ snap.schedule }}</span>
       <span id="live">live</span>
     </div>
+    <form id="automation" method="post" action="{{ url_for('automation') }}">
+      <input type="hidden" name="op" value="{{ 'resume' if snap.paused else 'pause' }}">
+      <button type="submit" class="{{ 'primary' if snap.paused else '' }}">{% if snap.paused %}&#9654; Resume automation{% else %}&#10074;&#10074; Pause automation{% endif %}</button>
+    </form>
   </div>
 
   <div class="card" style="margin-bottom:.8rem">
@@ -573,8 +592,16 @@ PAGE = """<!doctype html>
 
     <p><b>Status bar (top).</b> A green <span class="hl">AUTO</span> badge means the
     automation is in control. An amber <span class="hl">SCHEDULED OFF</span> means
-    you're inside an off-window (ACs kept off). The line underneath shows the
-    on/off schedule and the daily safety shut-off time.</p>
+    you're inside an off-window (ACs kept off). A red <span class="hl">PAUSED</span>
+    means you paused the automation. The line underneath shows the on/off schedule
+    and the daily safety shut-off time.</p>
+
+    <p><b>Pause / Resume.</b> <b>Pause automation</b> (top right) stops the
+    automation from touching any AC &mdash; no humidity Dry/Off and no scheduled
+    off &mdash; so you can run them by hand. It stays paused (even across restarts)
+    until you press <b>Resume automation</b>, which picks up from each AC's
+    current state. Laundry mode and the daily safety shut-off still run while
+    paused.</p>
 
     <p><b>Sensors.</b> One card per room: current humidity (%RH), temperature,
     battery and signal. The colour reflects how humid the room is.</p>
@@ -583,7 +610,6 @@ PAGE = """<!doctype html>
     <ul>
       <li>Humidity rises above the ON threshold &rarr; the AC switches to <b>Dry</b>.
       It keeps drying until humidity falls to the OFF threshold, then turns off.</li>
-      <li>It is <b>always on</b> &mdash; there is no pause button.</li>
       <li>If you set an AC to <b>Cool</b> or <b>Heat</b> (here or in the Gree app),
       the automation <b>leaves it alone</b> &mdash; that room is yours to control.</li>
       <li>Set it back to <b>Dry</b> or <b>Off</b> and the automation
@@ -656,6 +682,14 @@ async function update() {
   document.getElementById('meta').textContent = d.meta;
   const sched = document.getElementById('sched');
   sched.textContent = d.schedule; sched.hidden = !d.schedule;
+
+  const af = document.getElementById('automation');
+  af.querySelector('input[name=op]').value = d.paused ? 'resume' : 'pause';
+  const ab = af.querySelector('button');
+  if (!ab.classList.contains('busy')) {
+    ab.className = d.paused ? 'primary' : '';
+    ab.innerHTML = d.paused ? '&#9654; Resume automation' : '&#10074;&#10074; Pause automation';
+  }
 
   const grid = document.getElementById('sensors');
   grid.innerHTML = d.sensors.length ? d.sensors.map(sensorCard).join('')
@@ -732,7 +766,7 @@ async function postForm(f, btn) {
 }
 document.addEventListener('submit', (e) => {
   const f = e.target;
-  if (!f.matches('form.ctl, .laundryform')) return;
+  if (!f.matches('form.ctl, #automation, .laundryform')) return;
   e.preventDefault();
   postForm(f, e.submitter);
 });
@@ -821,6 +855,22 @@ def action():
     if errors:
         return _respond(True, f"{label} sent (some ACs failed)")
     return _respond(True, f"{label} sent")
+
+
+@app.route("/automation", methods=["POST"])
+def automation():
+    """Pause or resume the automation. Paused, the controller leaves every AC as
+    it is (laundry and the daily force-off still run) until Resume."""
+    op = request.form.get("op")
+    if op == "pause":
+        core.write_override("paused")
+        core.logger.info("Web: automation PAUSED")
+        return _respond(True, "Automation paused — ACs stay as they are")
+    if op == "resume":
+        core.write_override("auto")
+        core.logger.info("Web: automation RESUMED")
+        return _respond(True, "Automation resumed")
+    return _respond(False, "Unknown action")
 
 
 @app.route("/laundry/start", methods=["POST"])
